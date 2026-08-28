@@ -271,11 +271,38 @@ func getDefinitions(
 		nil,
 	)
 
+	jvmThreadAttributes := NewAttrReportGroup(
+		false,
+		[]*AttrReportGroup{&appAttributes},
+		map[attr.Name]Default{
+			attr.JVMThreadDaemon: true,
+		},
+		nil,
+	)
+
 	nodejsEventLoopTimeAttributes := NewAttrReportGroup(
 		false,
 		[]*AttrReportGroup{&appAttributes},
 		map[attr.Name]Default{
 			attr.NodejsEventLoopState: true,
+		},
+		nil,
+	)
+
+	v8jsGCAttributes := NewAttrReportGroup(
+		false,
+		[]*AttrReportGroup{&appAttributes},
+		map[attr.Name]Default{
+			attr.V8JSGCType: true,
+		},
+		nil,
+	)
+
+	v8jsHeapSpaceAttributes := NewAttrReportGroup(
+		false,
+		[]*AttrReportGroup{&appAttributes},
+		map[attr.Name]Default{
+			attr.V8JSHeapSpaceName: true,
 		},
 		nil,
 	)
@@ -396,6 +423,7 @@ func getDefinitions(
 				attr.DBSystemName:     true,
 				attr.ErrorType:        true,
 				attr.DBCollectionName: false,
+				attr.DBNamespace:      true,
 			},
 		},
 		DBServerDuration.Section: {
@@ -405,6 +433,7 @@ func getDefinitions(
 				attr.DBSystemName:     true,
 				attr.ErrorType:        true,
 				attr.DBCollectionName: false,
+				attr.DBNamespace:      true,
 			},
 		},
 		MessagingPublishDuration.Section: {
@@ -517,6 +546,24 @@ func getDefinitions(
 			SubGroups:  []*AttrReportGroup{&appAttributes},
 			Attributes: map[attr.Name]Default{},
 		},
+		CPythonGCCollections.Section: {
+			SubGroups: []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{
+				attr.CPythonGCGeneration: true,
+			},
+		},
+		CPythonGCCollectedObjects.Section: {
+			SubGroups: []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{
+				attr.CPythonGCGeneration: true,
+			},
+		},
+		CPythonGCUncollectableObjects.Section: {
+			SubGroups: []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{
+				attr.CPythonGCGeneration: true,
+			},
+		},
 		JVMMemoryUsed.Section: {
 			SubGroups:  []*AttrReportGroup{&jvmMemoryAttributes},
 			Attributes: map[attr.Name]Default{},
@@ -533,8 +580,56 @@ func getDefinitions(
 			SubGroups:  []*AttrReportGroup{&jvmMemoryAttributes},
 			Attributes: map[attr.Name]Default{},
 		},
+		JVMClassLoaded.Section: {
+			SubGroups:  []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		JVMClassUnloaded.Section: {
+			SubGroups:  []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		JVMClassCount.Section: {
+			SubGroups:  []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		JVMThreadCount.Section: {
+			SubGroups:  []*AttrReportGroup{&jvmThreadAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		JVMCPUTime.Section: {
+			SubGroups:  []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		JVMCPUCount.Section: {
+			SubGroups:  []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		JVMCPURecentUtilization.Section: {
+			SubGroups:  []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
 		NodejsEventLoopTime.Section: {
 			SubGroups:  []*AttrReportGroup{&nodejsEventLoopTimeAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		V8JSGCDuration.Section: {
+			SubGroups:  []*AttrReportGroup{&v8jsGCAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		V8JSMemoryHeapLimit.Section: {
+			SubGroups:  []*AttrReportGroup{&v8jsHeapSpaceAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		V8JSMemoryHeapUsed.Section: {
+			SubGroups:  []*AttrReportGroup{&v8jsHeapSpaceAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		V8JSMemoryHeapSpaceAvailableSize.Section: {
+			SubGroups:  []*AttrReportGroup{&v8jsHeapSpaceAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		V8JSMemoryHeapSpacePhysicalSize.Section: {
+			SubGroups:  []*AttrReportGroup{&v8jsHeapSpaceAttributes},
 			Attributes: map[attr.Name]Default{},
 		},
 		StatTCPRtt.Section: {
