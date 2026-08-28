@@ -1489,6 +1489,51 @@ int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_clone, int tid) {
     return 0;
 }
 
+SEC("raw_tracepoint/task_newtask")
+int BPF_PROG(obi_raw_tracepoint_task_newtask, struct task_struct *task, u64 clone_flags) {
+    const u64 id = bpf_get_current_pid_tgid();
+
+    if (!valid_pid(id)) {
+        return 0;
+    }
+
+    const u32 child_tid = BPF_CORE_READ(task, pid);
+    const u32 child_tgid = BPF_CORE_READ(task, tgid);
+
+    // Threads share the parent's tgid. A new process has child_tid == child_tgid.
+    if (child_tid == child_tgid) {
+        return 0;
+    }
+
+    trace_key_t parent_key = {0};
+    task_tid(&parent_key.p_key);
+
+    tp_info_pid_t *parent_tp = bpf_map_lookup_elem(&server_traces, &parent_key);
+    if (!parent_tp) {
+        return 0;
+    }
+
+    trace_key_t child_key = {
+        .extra_id = 0,
+        .p_key =
+            {
+                .tid = child_tid,
+                .pid = child_tgid,
+                .ns = parent_key.p_key.ns,
+            },
+    };
+
+    bpf_dbg_printk("=== raw_tracepoint/task_newtask parent_tid=%d -> child_tid=%d ===",
+                   parent_key.p_key.tid,
+                   child_tid);
+
+    tp_info_pid_t child_tp = {0};
+    __builtin_memcpy(&child_tp, parent_tp, sizeof(tp_info_pid_t));
+    bpf_map_update_elem(&server_traces, &child_key, &child_tp, BPF_ANY);
+
+    return 0;
+}
+
 SEC("kprobe/sys_exit")
 int BPF_KPROBE_GUARDED(obi_kprobe_sys_exit, int status) {
     (void)ctx;
