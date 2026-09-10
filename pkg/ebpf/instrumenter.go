@@ -1026,6 +1026,44 @@ func (i *instrumenter) tracepoint(funcName string, programs ebpfcommon.ProbeDesc
 	return nil
 }
 
+func (i *instrumenter) rawtracepoints(p KprobesTracer) error {
+	for sfunc, sprobes := range p.RawTracepoints() {
+		slog.Debug("going to add raw tracepoint", "function", sfunc, "probes", sprobes)
+
+		if err := i.rawtracepoint(sfunc, sprobes); err != nil {
+			if sprobes.Required {
+				if i.metrics != nil {
+					i.metrics.InstrumentationError(i.processName, imetrics.InstrumentationErrorInvalidTracepoint)
+				}
+				return fmt.Errorf("instrumenting raw tracepoint %q: %w", sfunc, err)
+			}
+
+			slog.Debug("error instrumenting raw tracepoint", "function", sfunc, "error", err)
+		}
+		p.AddCloser(i.closables...)
+	}
+
+	return nil
+}
+
+func (i *instrumenter) rawtracepoint(funcName string, programs ebpfcommon.ProbeDesc) error {
+	if programs.Start != nil {
+		kp, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+			Name:    funcName,
+			Program: programs.Start,
+		})
+		if err != nil {
+			if i.metrics != nil {
+				i.metrics.InstrumentationError(i.processName, imetrics.InstrumentationErrorInvalidTracepoint)
+			}
+			return fmt.Errorf("attaching raw tracepoint: %w", err)
+		}
+		i.closables = append(i.closables, kp)
+	}
+
+	return nil
+}
+
 func (i *instrumenter) iters(p Tracer) error {
 	for _, iter := range p.Iters() {
 		slog.Debug("Attaching iterator", "program", iter.Program.String())

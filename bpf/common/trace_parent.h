@@ -23,6 +23,7 @@
 #include <maps/fd_to_connection.h>
 #include <maps/java_tasks.h>
 #include <maps/java_vt_threads.h>
+#include <maps/newtask_map.h>
 #include <maps/nginx_upstream.h>
 #include <maps/nodejs_fd_map.h>
 #include <maps/puma_tasks.h>
@@ -130,6 +131,9 @@ static __always_inline tp_info_pid_t *find_parent_process_trace(trace_key_t *t_k
     // Up to 5 levels of thread nesting allowed
     enum { k_max_depth = 5 };
 
+    // Save the original key so the second loop can restart from it
+    const pid_key_t original_p_key = t_key->p_key;
+
     for (u8 i = 0; i < k_max_depth; ++i) {
         tp_info_pid_t *server_tp = bpf_map_lookup_elem(&server_traces, t_key);
 
@@ -140,6 +144,10 @@ static __always_inline tp_info_pid_t *find_parent_process_trace(trace_key_t *t_k
                            t_key->extra_id);
             return server_tp;
         }
+        bpf_dbg_printk("(Server Process)No parent trace for pid=%d, ns=%lx, extra_id=%llx",
+                       t_key->p_key.pid,
+                       t_key->p_key.ns,
+                       t_key->extra_id);
 
         // not this goroutine running the server request processing
         // Let's find the parent scope
@@ -148,9 +156,50 @@ static __always_inline tp_info_pid_t *find_parent_process_trace(trace_key_t *t_k
         if (!p_tid) {
             break;
         }
+        bpf_dbg_printk("(Server Process)Found parent tid=%d, ns=%lx, pid=%d",
+                       p_tid->tid,
+                       p_tid->ns,
+                       p_tid->pid);
 
         // Lookup now to see if the parent was a request
         t_key->p_key = *p_tid;
+    }
+
+    // Second pass: walk the newtask_map (child -> parent) to find a parent trace
+    t_key->p_key = original_p_key;
+
+    for (u8 i = 0; i < k_max_depth; ++i) {
+        const pid_key_t *newtask_parent =
+            (const pid_key_t *)bpf_map_lookup_elem(&newtask_map, &t_key->p_key);
+
+        if (!newtask_parent) {
+            bpf_dbg_printk("(NewTask)No newtask entry for pid=%d, tid=%d, ns=%lx",
+                           t_key->p_key.pid,
+                           t_key->p_key.tid,
+                           t_key->p_key.ns);
+            break;
+        }
+
+        bpf_dbg_printk("(NewTask)Found parent tid=%d, ns=%lx, pid=%d",
+                       newtask_parent->tid,
+                       newtask_parent->ns,
+                       newtask_parent->pid);
+
+        // Move up to the parent and check if it has a trace in server_traces
+        t_key->p_key = *newtask_parent;
+
+        tp_info_pid_t *server_tp = bpf_map_lookup_elem(&server_traces, t_key);
+        if (server_tp) {
+            bpf_dbg_printk("(NewTask)Found server trace for pid=%d, tid=%d, ns=%lx",
+                           t_key->p_key.pid,
+                           t_key->p_key.tid,
+                           t_key->p_key.ns);
+            return server_tp;
+        }
+
+        bpf_dbg_printk("(NewTask)No server trace for parent pid=%d, tid=%d",
+                       t_key->p_key.pid,
+                       t_key->p_key.tid);
     }
 
     return NULL;
@@ -224,6 +273,8 @@ static __always_inline tp_info_pid_t *find_parent_java_trace(trace_key_t *t_key)
                            t_key->p_key.pid,
                            t_key->p_key.ns,
                            t_key->extra_id);
+            // Also print out the tid of the parent trace for debugging
+            bpf_dbg_printk("(Java)Found parent trace for tid=%d", t_key->p_key.tid);
             return server_tp;
         }
 
@@ -294,7 +345,15 @@ static __always_inline tp_info_pid_t *find_parent_trace(const pid_connection_inf
                                                         trace_key_t *t_key,
                                                         u16 orig_dport) {
     tp_info_pid_t *node_tp = find_nodejs_parent_trace(p_conn, orig_dport, pid_tgid);
+    bpf_dbg_printk("find_parent_trace: node_tp=%llx", node_tp);
+    bpf_dbg_printk("find_parent_trace: pid=%d, ns=%lx, extra_id=%llx",
+                   t_key->p_key.pid,
+                   t_key->p_key.ns,
+                   t_key->extra_id);
+    bpf_dbg_printk("find_parent_trace: ptid=%d", t_key->p_key.tid);
 
+    bpf_dbg_printk("find_parent_trace: lw_thread=%llx", lw_thread);
+    bpf_dbg_printk("find_parent_trace: orig_dport=%d", orig_dport);
     if (node_tp) {
         return node_tp;
     }

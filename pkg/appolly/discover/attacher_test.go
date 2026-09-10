@@ -70,6 +70,7 @@ func (r *recordingTracer) AddCloser(...io.Closer)                               
 func (r *recordingTracer) SetupTailCalls()                                        {}
 func (r *recordingTracer) KProbes() map[string]ebpfcommon.ProbeDesc               { return nil }
 func (r *recordingTracer) Tracepoints() map[string]ebpfcommon.ProbeDesc           { return nil }
+func (r *recordingTracer) RawTracepoints() map[string]ebpfcommon.ProbeDesc        { return nil }
 func (r *recordingTracer) GoProbes() map[string][]*ebpfcommon.ProbeDesc           { return nil }
 func (r *recordingTracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc { return nil }
 func (r *recordingTracer) USDTProbes() map[string][]*ebpfcommon.USDTProbeDesc     { return nil }

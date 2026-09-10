@@ -278,6 +278,12 @@ func (pt *ProcessTracer) loadTracer(eventContext *common.EBPFEventContext, p Tra
 		return err
 	}
 
+	// Raw tracepoints support
+	if err := i.rawtracepoints(p); err != nil {
+		printVerifierErrorInfo(err)
+		return err
+	}
+
 	// Sock filters support
 	if err := i.sockfilters(p); err != nil {
 		printVerifierErrorInfo(err)
@@ -603,6 +609,11 @@ func RunUtilityTracer(ctx context.Context, eventContext *common.EBPFEventContext
 	}
 
 	if err := i.tracepoints(p); err != nil {
+		printVerifierErrorInfo(err)
+		return err
+	}
+
+	if err := i.rawtracepoints(p); err != nil {
 		printVerifierErrorInfo(err)
 		return err
 	}

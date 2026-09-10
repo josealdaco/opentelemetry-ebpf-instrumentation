@@ -456,6 +456,15 @@ func (p *Tracer) Tracepoints() map[string]ebpfcommon.ProbeDesc {
 	return nil
 }
 
+func (p *Tracer) RawTracepoints() map[string]ebpfcommon.ProbeDesc {
+	return map[string]ebpfcommon.ProbeDesc{
+		"task_newtask": {
+			Required: false,
+			Start:    p.bpfObjects.ObiRawTracepointTaskNewtask,
+		},
+	}
+}
+
 func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
 	m := map[string]map[string][]*ebpfcommon.ProbeDesc{
 		"libssl.so": {
