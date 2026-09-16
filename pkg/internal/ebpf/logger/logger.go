@@ -73,6 +73,10 @@ func (p *BPFLogger) Tracepoints() map[string]ebpfcommon.ProbeDesc {
 	return nil
 }
 
+func (p *BPFLogger) RawTracepoints() map[string]ebpfcommon.ProbeDesc {
+	return nil
+}
+
 func (p *BPFLogger) SetupTailCalls() {}
 
 func (p *BPFLogger) Run(ctx context.Context) {

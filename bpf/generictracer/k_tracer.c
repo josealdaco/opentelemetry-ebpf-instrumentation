@@ -30,6 +30,7 @@
 #include <generictracer/k_unix_sock.h>
 #include <generictracer/maps/active_accept_args.h>
 #include <generictracer/maps/active_connect_args.h>
+#include <generictracer/maps/exit_timers.h>
 #include <generictracer/maps/listening_ports.h>
 #include <generictracer/maps/sock_filter_buffers.h>
 #include <generictracer/maps/tcp_connection_map.h>
@@ -52,6 +53,7 @@
 #include <maps/filter_ports.h>
 #include <maps/fd_to_connection.h>
 #include <maps/msg_buffers.h>
+#include <maps/newtask_map.h>
 #include <maps/sock_pids.h>
 #include <maps/unreadable_buffer_ports.h>
 #include <pid/pid.h>
@@ -408,6 +410,13 @@ int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_connect, int res) {
         info.orig_dport = orig_dport;
 
         bpf_map_update_elem(&pid_tid_to_conn, &id, &info, BPF_ANY); // Support SSL lookup
+
+        // Client-side fd mapping, mirroring the accept path: OpenSSL 1.0.x
+        // clients (e.g. CPython 2.7 wrapping an outgoing socket for HTTPS)
+        // wire the socket with SSL_set_fd right after connect, and the
+        // SSL_set_fd uprobe resolves the connection through this map.
+        const fd_key fkey = {.pid_tgid = id, .fd = args->fd};
+        bpf_map_update_elem(&fd_to_connection, &fkey, &info.p_conn.conn, BPF_ANY);
 
         setup_cp_support_conn_info(&info.p_conn, true);
 
@@ -1274,7 +1283,7 @@ typedef struct sock_tailcall_ctx {
     protocol_info_t tcp;
     egress_key_t e_key;
     u8 niter;
-    bool has_parent_tp;
+    u8 has_parent_tp;
     u8 pad[2];
 } sock_tailcall_ctx;
 
@@ -1484,29 +1493,113 @@ int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_clone, int tid) {
     };
 
     bpf_dbg_printk("=== kretprobe/sys_clone id->tid: %d -> %d ===", id, tid);
+    bpf_dbg_printk("=== kretprobe/sys_clone parentpid: %d, parenttid: %d, parent_ns: %d  ===",
+                   parent.pid,
+                   parent.tid,
+                   parent.ns);
     bpf_map_update_elem(&clone_map, &child, &parent, BPF_ANY);
 
     return 0;
 }
 
-SEC("kprobe/sys_exit")
-int BPF_KPROBE_GUARDED(obi_kprobe_sys_exit, int status) {
-    (void)ctx;
-    (void)status;
-
+SEC("raw_tracepoint/task_newtask")
+int BPF_PROG(obi_raw_tracepoint_task_newtask, struct task_struct *task, u64 clone_flags) {
     const u64 id = bpf_get_current_pid_tgid();
 
     if (!valid_pid(id)) {
         return 0;
     }
 
-    trace_key_t task = {0};
-    task_tid(&task.p_key);
-
-    bpf_dbg_printk("=== kprobe/sys_exit id=%d, pid=%d, valid_pid(id)=%d ===",
+    // Kernel-view ids, only used to distinguish threads from new processes
+    const u32 child_tid = BPF_CORE_READ(task, pid);
+    const u32 child_tgid = BPF_CORE_READ(task, tgid);
+    bpf_dbg_printk("=== raw_tracepoint/task_newtask id=%d, child_tid=%d, child_tgid=%d ===",
                    id,
-                   pid_from_pid_tgid(id),
-                   valid_pid(id));
+                   child_tid,
+                   child_tgid);
+    // Threads share the parent's tgid. A new process has child_tid == child_tgid.
+    if (child_tid == child_tgid) {
+        return 0;
+    }
+
+    // Parent (current task) as seen by the user namespace
+    pid_key_t parent_key = {0};
+    task_tid(&parent_key);
+
+    // Child tid as seen by the user namespace: read the namespaced pid
+    // from the child's thread_pid at the namespace level of the new task
+    struct upid upid = {0};
+    const unsigned int level = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, level);
+    struct pid *ns_pid = (struct pid *)BPF_CORE_READ(task, thread_pid);
+    bpf_probe_read_kernel(&upid, sizeof(upid), &ns_pid->numbers[level]);
+    const u32 child_ns_tid = (u32)upid.nr;
+
+    // Namespace of the new task
+    const u32 ns = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
+
+    // Build the child's key: user namespace parent pid + user namespace child tid
+    parent_key.tid =
+        child_ns_tid; // We need to set the parent tid to the child tid for the mapping to work correctly
+    pid_key_t child_p_key = {
+        .tid = child_ns_tid,
+        .pid = parent_key.pid,
+        .ns = ns,
+    };
+
+    bpf_dbg_printk("=== task_newtask mapping child: ns_parent_pid=%d ns_child_tid=%d ns=%x ===",
+                   parent_key.pid,
+                   child_ns_tid,
+                   ns);
+
+    // Register a new span for this unique child tid in server_traces, so that
+    // later parent trace lookups (find_parent_process_trace) find a trace for
+    // the child thread's operations instead of returning nothing.
+    tp_info_pid_t child_tp = {0};
+    child_tp.valid = 1;
+    child_tp.pid = child_p_key.pid;
+    // Placeholder root context: the first operation on this thread adopts it
+    // (becomes the exported root span) and the entry is then promoted to a
+    // regular live parent, so subsequent operations attach to that first span
+    child_tp.req_type = k_event_type_thread_root;
+    // Root span: new trace_id/span_id, zeroed parent_id, ts and sampled flag
+    init_new_trace(&child_tp.tp);
+    trace_key_t child_trace_key = {
+        .extra_id = 0,
+        .p_key = child_p_key,
+    };
+
+    // Only register a new span if one doesn't already exist for this child key
+    tp_info_pid_t *existing_tp = bpf_map_lookup_elem(&server_traces, &child_trace_key);
+    if (existing_tp) {
+        bpf_dbg_printk("=== task_newtask span already exists: pid=%d tid=%d ns=%x ===",
+                       child_trace_key.p_key.pid,
+                       child_trace_key.p_key.tid,
+                       child_trace_key.p_key.ns);
+        return 0;
+    }
+
+    bpf_dbg_printk("=== task_newtask registering new span: pid=%d tid=%d ns=%x ===",
+                   child_trace_key.p_key.pid,
+                   child_trace_key.p_key.tid,
+                   child_trace_key.p_key.ns);
+
+    bpf_map_update_elem(&server_traces, &child_trace_key, &child_tp, BPF_ANY);
+
+    return 0;
+}
+
+enum { k_sys_exit_cleanup_delay_ns = 10000000 }; // 1 millisecond
+enum { k_sys_exit_max_drain = 8 };               // bounded work per invocation
+
+static __always_inline void sys_exit_cleanup(const exit_pending_t *pending) {
+    trace_key_t task = pending->task;
+    const u64 id = pending->id;
+
+    bpf_dbg_printk("=== sys_exit deferred cleanup id=%d, tid=%d, pid=%d, ns=%d ===",
+                   id,
+                   task.p_key.tid,
+                   task.p_key.pid,
+                   task.p_key.ns);
 
     bpf_map_delete_elem(&clone_map, &task.p_key);
     // This won't delete trace ids for traces with extra_id, like NodeJS. But,
@@ -1520,6 +1613,54 @@ int BPF_KPROBE_GUARDED(obi_kprobe_sys_exit, int status) {
     // A carrier dying without VirtualThread.unmount() must not leave a
     // stale entry that would re-key a future thread reusing this tid.
     bpf_map_delete_elem(&java_vt_threads, &task.p_key);
+}
+
+SEC("kprobe/sys_exit")
+int BPF_KPROBE_GUARDED(obi_kprobe_sys_exit, int status) {
+    (void)ctx;
+    (void)status;
+
+    const u64 id = bpf_get_current_pid_tgid();
+
+    if (!valid_pid(id)) {
+        return 0;
+    }
+
+    const u64 now = bpf_ktime_get_ns();
+
+    exit_pending_t pending = {};
+    task_tid(&pending.task.p_key);
+    pending.id = id;
+    pending.deadline_ns = now + k_sys_exit_cleanup_delay_ns;
+
+    bpf_dbg_printk("=== kprobe/sys_exit id=%d, tid=%d, pid=%d, ns=%d ===",
+                   id,
+                   pending.task.p_key.tid,
+                   pending.task.p_key.pid,
+                   pending.task.p_key.ns);
+
+    // kprobes can't sleep or use bpf_timer: enqueue the cleanup with a
+    // deadline, to be drained by later sys_exit invocations
+    if (bpf_map_push_elem(&exit_pending_queue, &pending, BPF_ANY) != 0) {
+        // Queue full: clean up immediately rather than leaking entries
+        sys_exit_cleanup(&pending);
+        return 0;
+    }
+
+    // Drain entries whose deadline has passed (bounded work per invocation)
+    for (u8 i = 0; i < k_sys_exit_max_drain; ++i) {
+        exit_pending_t head = {};
+        if (bpf_map_peek_elem(&exit_pending_queue, &head) != 0) {
+            break;
+        }
+        if (head.deadline_ns > now) {
+            break;
+        }
+        if (bpf_map_pop_elem(&exit_pending_queue, &head) != 0) {
+            break;
+        }
+        sys_exit_cleanup(&head);
+    }
 
     return 0;
 }

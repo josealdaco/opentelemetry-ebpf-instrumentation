@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -404,8 +405,9 @@ type uprobeModule struct {
 	probes    []map[string][]*ebpfcommon.ProbeDesc
 }
 
-func (i *instrumenter) uprobeModules(p Tracer, pid app.PID, maps []*procfs.ProcMap, exePath string, exeIno uint64, log *slog.Logger) map[uint64]*uprobeModule {
+func (i *instrumenter) uprobeModules(p Tracer, pid app.PID, maps []*procfs.ProcMap, exePath string, exeIno uint64, log *slog.Logger) (map[uint64]*uprobeModule, []string) {
 	modules := map[uint64]*uprobeModule{}
+	var missingLibs []string
 
 	for lib, pMap := range p.UProbes() {
 		baseLib, selected, err := matchVersionedUprobeLibrary(lib, maps)
@@ -429,6 +431,11 @@ func (i *instrumenter) uprobeModules(p Tracer, pid app.PID, maps []*procfs.ProcM
 		if !found {
 			// E.g. NodeJS uses OpenSSL but they ship it as statically linked in the node binary
 			log.Debug(lib+" not linked, attempting to instrument executable", "path", instrPath)
+			// The library may still be dlopen'ed later: Python's CFFI modules
+			// (e.g. cryptography's _openssl.abi3.so) are mapped only when the
+			// application first imports them, which can happen well after
+			// process startup. Remember it for the deferred retry.
+			missingLibs = append(missingLibs, lib)
 		}
 
 		mod, ok := modules[instrumentedIno]
@@ -441,7 +448,7 @@ func (i *instrumenter) uprobeModules(p Tracer, pid app.PID, maps []*procfs.ProcM
 		}
 	}
 
-	return modules
+	return modules, missingLibs
 }
 
 // dedupModuleProbes filters out probe descriptors that would attach the same
@@ -635,50 +642,127 @@ func (i *instrumenter) uprobes(pid app.PID, p Tracer, maps []*procfs.ProcMap) er
 
 	// Group all uprobes by module they should attach to.
 	// Eg. node ssl and runtime probes attach to the same binary
-	modules := i.uprobeModules(p, pid, maps, exePath, exeIno, log)
+	modules, missingLibs := i.uprobeModules(p, pid, maps, exePath, exeIno, log)
 
 	for instrumentedIno, m := range modules {
-		// We've already instrumented this module for the executable we have in hand, likely another earlier PID
-		if i.hasModule(instrumentedIno) {
-			log.Debug("already instrumented module for executable, ignoring...", "path", m.instrPath, "ino", instrumentedIno)
-			continue
-		}
+		i.instrumentModule(p, m, instrumentedIno, log)
+	}
 
-		// Check if this is a library used by multiple executables. For example, a shared libssl.so between multiple executables.
-		if p.AlreadyInstrumentedLib(instrumentedIno) {
-			log.Debug("module already instrumented by other processes, incrementing reference count", "lib", m.lib, "path", m.instrPath, "ino", instrumentedIno)
-			i.addModule(instrumentedIno)             // remember this mapping for linking/unlinking for this executable instance
-			p.AddInstrumentedLibRef(instrumentedIno) // record one more use of this shared library
-			continue
-		}
-
-		libExe, err := link.OpenExecutable(m.instrPath)
-		if err != nil {
-			log.Debug("can't open executable for inspection", "error", err)
-			continue
-		}
-
-		for j := range m.probes {
-			if err := gatherOffsets(m.instrPath, m.probes[j], log); err != nil {
-				log.Debug("error gathering offsets", "error", err)
-				continue
-			}
-
-			closers, err := i.instrumentProbes(libExe, m.probes[j])
-			if err != nil {
-				log.Debug("error instrumenting probes", "error", err)
-				continue
-			}
-
-			log.Debug("adding module for instrumenter and incrementing reference count", "path", m.instrPath, "ino", instrumentedIno)
-
-			// We bump the count of uses of the underlying shared library with a new executable
-			p.RecordInstrumentedLib(instrumentedIno, closers)
-			i.addModule(instrumentedIno)
-		}
+	if len(missingLibs) > 0 {
+		go i.retryDeferredLibs(pid, p, missingLibs, exePath, exeIno, log)
 	}
 
 	return nil
+}
+
+func (i *instrumenter) instrumentModule(p Tracer, m *uprobeModule, instrumentedIno uint64, log *slog.Logger) {
+	// We've already instrumented this module for the executable we have in hand, likely another earlier PID
+	if i.hasModule(instrumentedIno) {
+		log.Debug("already instrumented module for executable, ignoring...", "path", m.instrPath, "ino", instrumentedIno)
+		return
+	}
+
+	// Check if this is a library used by multiple executables. For example, a shared libssl.so between multiple executables.
+	if p.AlreadyInstrumentedLib(instrumentedIno) {
+		log.Debug("module already instrumented by other processes, incrementing reference count", "lib", m.lib, "path", m.instrPath, "ino", instrumentedIno)
+		i.addModule(instrumentedIno)             // remember this mapping for linking/unlinking for this executable instance
+		p.AddInstrumentedLibRef(instrumentedIno) // record one more use of this shared library
+		return
+	}
+
+	libExe, err := link.OpenExecutable(m.instrPath)
+	if err != nil {
+		log.Debug("can't open executable for inspection", "error", err)
+		return
+	}
+
+	for j := range m.probes {
+		if err := gatherOffsets(m.instrPath, m.probes[j], log); err != nil {
+			log.Debug("error gathering offsets", "error", err)
+			continue
+		}
+
+		closers, err := i.instrumentProbes(libExe, m.probes[j])
+		if err != nil {
+			log.Debug("error instrumenting probes", "error", err)
+			continue
+		}
+
+		log.Debug("adding module for instrumenter and incrementing reference count", "path", m.instrPath, "ino", instrumentedIno)
+
+		// We bump the count of uses of the underlying shared library with a new executable
+		p.RecordInstrumentedLib(instrumentedIno, closers)
+		i.addModule(instrumentedIno)
+	}
+}
+
+const deferredLibRetryInterval = 5 * time.Second
+
+// retryDeferredLibs waits for uprobe libraries that were absent from the
+// process maps at attach time to appear, and instruments them when they do.
+// Runtimes that load their TLS stack lazily need this: Python maps CFFI
+// modules such as cryptography's _openssl.abi3.so only when the application
+// first imports them, which can happen at any point in the process lifetime
+// (e.g. a worker's first outbound TLS call). Polls until the process exits.
+func (i *instrumenter) retryDeferredLibs(pid app.PID, p Tracer, libs []string, exePath string, exeIno uint64, log *slog.Logger) {
+	for {
+		time.Sleep(deferredLibRetryInterval)
+
+		maps, err := processMaps(pid)
+		if err != nil {
+			// process is gone
+			return
+		}
+
+		pending := libs[:0]
+		for _, lib := range libs {
+			if !i.retryDeferredLib(pid, p, lib, maps, exePath, exeIno, log) {
+				pending = append(pending, lib)
+			}
+		}
+
+		libs = pending
+		if len(libs) == 0 {
+			return
+		}
+	}
+}
+
+// retryDeferredLib attempts to instrument a single deferred library. Returns
+// true when the library is done: either instrumented or permanently resolved.
+func (i *instrumenter) retryDeferredLib(pid app.PID, p Tracer, lib string, maps []*procfs.ProcMap, exePath string, exeIno uint64, log *slog.Logger) bool {
+	if procs.LibPath(lib, maps) == nil {
+		return false
+	}
+
+	instrPath, instrumentedIno, mappedPath, found := resolveInstrPath(pid, lib, maps, exePath, exeIno)
+	if !found {
+		return false
+	}
+
+	log.Debug("deferred uprobe library appeared, instrumenting", "lib", lib, "path", mappedPath, "ino", instrumentedIno)
+
+	pMap, ok := p.UProbes()[lib]
+	if !ok {
+		return true
+	}
+
+	// Deep-copy the probe descriptors: the shared ones may be concurrently
+	// resolved against another executable by the discovery goroutine.
+	probesCopy := make(map[string][]*ebpfcommon.ProbeDesc, len(pMap))
+	for sym, descs := range pMap {
+		copies := make([]*ebpfcommon.ProbeDesc, 0, len(descs))
+		for _, d := range descs {
+			c := *d
+			copies = append(copies, &c)
+		}
+		probesCopy[sym] = copies
+	}
+
+	m := &uprobeModule{lib: lib, instrPath: instrPath, probes: []map[string][]*ebpfcommon.ProbeDesc{probesCopy}}
+	i.instrumentModule(p, m, instrumentedIno, log)
+
+	return true
 }
 
 func (i *instrumenter) usdtProbes(pid app.PID, ns uint32, p Tracer, maps []*procfs.ProcMap) error {
@@ -874,6 +958,21 @@ func (i *instrumenter) uprobe(exe *link.Executable, probe *ebpfcommon.ProbeDesc)
 	}
 
 	if probe.End != nil {
+		if probe.KernelUretprobe {
+			up, err := exe.Uretprobe("", probe.End, &link.UprobeOptions{
+				Address: probe.StartOffset,
+			})
+			if err != nil {
+				if i.metrics != nil {
+					i.metrics.InstrumentationError(i.processName, imetrics.InstrumentationErrorAttachingUprobe)
+				}
+				return closers, fmt.Errorf("setting kernel uretprobe: %w", err)
+			}
+
+			closers = append(closers, up)
+			return closers, nil
+		}
+
 		if len(probe.ReturnOffsets) == 0 {
 			if i.metrics != nil {
 				i.metrics.InstrumentationError(i.processName, imetrics.InstrumentationErrorAttachingUprobe)
@@ -1026,6 +1125,44 @@ func (i *instrumenter) tracepoint(funcName string, programs ebpfcommon.ProbeDesc
 	return nil
 }
 
+func (i *instrumenter) rawtracepoints(p KprobesTracer) error {
+	for sfunc, sprobes := range p.RawTracepoints() {
+		slog.Debug("going to add raw tracepoint", "function", sfunc, "probes", sprobes)
+
+		if err := i.rawtracepoint(sfunc, sprobes); err != nil {
+			if sprobes.Required {
+				if i.metrics != nil {
+					i.metrics.InstrumentationError(i.processName, imetrics.InstrumentationErrorInvalidTracepoint)
+				}
+				return fmt.Errorf("instrumenting raw tracepoint %q: %w", sfunc, err)
+			}
+
+			slog.Debug("error instrumenting raw tracepoint", "function", sfunc, "error", err)
+		}
+		p.AddCloser(i.closables...)
+	}
+
+	return nil
+}
+
+func (i *instrumenter) rawtracepoint(funcName string, programs ebpfcommon.ProbeDesc) error {
+	if programs.Start != nil {
+		kp, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+			Name:    funcName,
+			Program: programs.Start,
+		})
+		if err != nil {
+			if i.metrics != nil {
+				i.metrics.InstrumentationError(i.processName, imetrics.InstrumentationErrorInvalidTracepoint)
+			}
+			return fmt.Errorf("attaching raw tracepoint: %w", err)
+		}
+		i.closables = append(i.closables, kp)
+	}
+
+	return nil
+}
+
 func (i *instrumenter) iters(p Tracer) error {
 	for _, iter := range p.Iters() {
 		slog.Debug("Attaching iterator", "program", iter.Program.String())
@@ -1071,12 +1208,16 @@ func (i *instrumenter) tracing(p Tracer) error {
 
 func (i *instrumenter) hasModule(ino uint64) bool {
 	slog.Debug("looking up module", "instrumenter", i, "ino", ino)
+	i.modulesMu.Lock()
+	defer i.modulesMu.Unlock()
 	_, ok := i.modules[ino]
 	return ok
 }
 
 func (i *instrumenter) addModule(ino uint64) {
 	slog.Debug("remembering module for", "instrumenter", i, "ino", ino)
+	i.modulesMu.Lock()
+	defer i.modulesMu.Unlock()
 	i.modules[ino] = struct{}{}
 }
 
@@ -1192,11 +1333,23 @@ func applyResolvedSymbolOffsets(
 	log *slog.Logger,
 ) {
 	probe.StartOffset = sym.Off
-	if returnErr != nil {
+	if returnErr == nil {
+		probe.ReturnOffsets = returnOffsets
+	} else {
 		log.Debug("error finding return offsets", "symbol", symbolName, "path", instrPath, "matched_symbol", sym.Name, "error", returnErr)
-		return
 	}
-	probe.ReturnOffsets = returnOffsets
+
+	// No usable return offsets for a probe that needs them: attach the End
+	// program as a genuine kernel uretprobe instead. This happens when the
+	// function returns through instructions the scanner cannot resolve (e.g.
+	// pointer-authenticated returns on arm64, tail calls into another symbol,
+	// or truncated symbol data). Safe here because these are C library probes;
+	// Go probes resolve their offsets through gatherGoOffsets, never this path.
+	if probe.End != nil && len(probe.ReturnOffsets) == 0 {
+		probe.KernelUretprobe = true
+		log.Debug("no return offsets, falling back to kernel uretprobe",
+			"symbol", symbolName, "path", instrPath)
+	}
 }
 
 func handleSymbolDataReadFailure(
@@ -1210,13 +1363,13 @@ func handleSymbolDataReadFailure(
 		return nil
 	}
 
+	// Return offsets can't be discovered without the instruction bytes:
+	// attach the End program as a kernel uretprobe instead of dropping the
+	// probe (C library probes only; Go probes never resolve through here).
 	probe.ReturnOffsets = nil
-	if probe.Required {
-		return fmt.Errorf("required symbol %s needs return offsets but symbol data could not be read from %s", symbolName, instrPath)
-	}
-
-	probe.Skip = true
-	log.Debug("skipping optional uprobe because return offsets need symbol data", "symbol", symbolName, "path", instrPath)
+	probe.KernelUretprobe = true
+	log.Debug("symbol data unavailable, falling back to kernel uretprobe",
+		"symbol", symbolName, "path", instrPath)
 	return nil
 }
 

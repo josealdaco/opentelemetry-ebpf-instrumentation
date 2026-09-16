@@ -163,6 +163,13 @@ type ProbeDesc struct {
 
 	// Skip is set when an optional uprobe symbol was not resolved.
 	Skip bool
+
+	// KernelUretprobe makes End attach as a genuine kernel uretprobe at the
+	// symbol start instead of uprobes at ReturnOffsets. Set for shared C
+	// library probes when RET-offset discovery fails (tail-called wrappers,
+	// pointer-authenticated returns, symbols without size). Never set for Go
+	// probes: kernel uretprobes are unsafe with the Go runtime's stack moves.
+	KernelUretprobe bool
 }
 
 // GoProbe associates an ordered Go symbol with the eBPF program attached to it.
@@ -467,6 +474,16 @@ func NewEBPFParseContext(cfg *config.EBPFTracer, spansChan *msg.Queue[[]request.
 		mongoRequestCache = expirable.NewLRU[MongoRequestKey, *MongoRequestValue](cfg.MongoRequestsCacheSize, nil, 0)
 
 		payloadExtraction = cfg.PayloadExtraction
+
+		// Client-side payload detectors (Elasticsearch, AWS, GenAI, ...) parse
+		// the full request/response captured through BPF large buffers, which
+		// only exist when the HTTP capture size is non-zero. Without it, spans
+		// silently export as plain HTTP.
+		if payloadExtraction.HTTP.ClientEnabled() && cfg.BufferSizes.HTTP == 0 {
+			ptlog().Warn("HTTP payload extraction is enabled but the HTTP capture buffer is 0; " +
+				"payload detectors (e.g. Elasticsearch) will not run. " +
+				"Set OTEL_EBPF_BPF_BUFFER_SIZE_HTTP (ebpf.buffer_sizes.http) to a non-zero value, e.g. 8192")
+		}
 
 		dnsEvents = expirable.NewLRU(1024, dnsEventExpireHandler(emitSpans), cfg.DNSRequestTimeout)
 	}

@@ -89,6 +89,10 @@ func (p *Watcher) Tracepoints() map[string]ebpfcommon.ProbeDesc {
 	return nil
 }
 
+func (p *Watcher) RawTracepoints() map[string]ebpfcommon.ProbeDesc {
+	return nil
+}
+
 func (p *Watcher) SetupTailCalls() {}
 
 func (p *Watcher) Run(ctx context.Context) {

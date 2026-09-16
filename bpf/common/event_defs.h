@@ -38,4 +38,8 @@ enum event_type : u8 {
     k_event_type_python_runtime_metrics = 29,
     k_event_type_jvm_runtime_metrics = 30,
     k_event_type_nodejs_resource = 31,
+    // BPF-internal only, never emitted to userspace: marks a placeholder
+    // trace context registered at thread creation (task_newtask) that the
+    // first operation on the thread adopts as its own root context
+    k_event_type_thread_root = 32,
 };

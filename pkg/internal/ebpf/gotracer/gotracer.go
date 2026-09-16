@@ -2222,6 +2222,10 @@ func (p *Tracer) Tracepoints() map[string]ebpfcommon.ProbeDesc {
 	return nil
 }
 
+func (p *Tracer) RawTracepoints() map[string]ebpfcommon.ProbeDesc {
+	return nil
+}
+
 func (p *Tracer) SocketFilters() []*ebpf.Program {
 	return nil
 }

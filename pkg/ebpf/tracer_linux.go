@@ -43,6 +43,7 @@ type instrumenter struct {
 	optionalGoProbeGroupClosers []io.Closer
 	processScopedGoProbes       []processScopedGoProbeRegistration
 	modules                     map[uint64]struct{}
+	modulesMu                   sync.Mutex
 	metrics                     imetrics.Reporter
 	processName                 string
 }
@@ -274,6 +275,12 @@ func (pt *ProcessTracer) loadTracer(eventContext *common.EBPFEventContext, p Tra
 
 	// Tracepoints support
 	if err := i.tracepoints(p); err != nil {
+		printVerifierErrorInfo(err)
+		return err
+	}
+
+	// Raw tracepoints support
+	if err := i.rawtracepoints(p); err != nil {
 		printVerifierErrorInfo(err)
 		return err
 	}
@@ -603,6 +610,11 @@ func RunUtilityTracer(ctx context.Context, eventContext *common.EBPFEventContext
 	}
 
 	if err := i.tracepoints(p); err != nil {
+		printVerifierErrorInfo(err)
+		return err
+	}
+
+	if err := i.rawtracepoints(p); err != nil {
 		printVerifierErrorInfo(err)
 		return err
 	}

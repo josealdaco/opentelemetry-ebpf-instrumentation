@@ -80,11 +80,18 @@ static __always_inline void tcp_get_or_set_trace_info(tcp_req_t *req,
     if (req->direction == TCP_SEND) { // Client
         const u8 found = find_trace_for_client_request(pid_conn, orig_dport, lw_thread, &req->tp);
         bpf_dbg_printk("Looking up client trace info, found=%d", found);
-        req->parent_status = found;
-        if (found) {
-            urand_bytes(req->tp.span_id, SPAN_ID_SIZE_BYTES);
+        if (found == k_parent_status_root) {
+            // This span adopted a thread-root placeholder: it is the root of
+            // the thread's trace and its span_id was already assigned (and
+            // recorded in server_traces), so it must not be regenerated
+            req->parent_status = k_parent_status_live;
         } else {
-            init_new_trace(&req->tp);
+            req->parent_status = found;
+            if (found) {
+                urand_bytes(req->tp.span_id, SPAN_ID_SIZE_BYTES);
+            } else {
+                init_new_trace(&req->tp);
+            }
         }
 
         set_tcp_trace_info(TRACE_TYPE_CLIENT,

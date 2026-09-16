@@ -77,6 +77,9 @@ type KprobesTracer interface {
 	// tapped into. Start matches kprobe, End matches kretprobe
 	KProbes() map[string]ebpfcommon.ProbeDesc
 	Tracepoints() map[string]ebpfcommon.ProbeDesc
+	// RawTracepoints returns a map with the name of the raw tracepoints that
+	// need to be attached (e.g. task_newtask). Only Start is used.
+	RawTracepoints() map[string]ebpfcommon.ProbeDesc
 }
 
 // Tracer is an individual eBPF program (e.g. the net/http or the grpc tracers)

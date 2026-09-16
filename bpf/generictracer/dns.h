@@ -394,13 +394,18 @@ static __always_inline void populate_dns_record(dns_req_t *req,
 
     const u8 found = find_trace_for_client_request_with_t_key(
         p_conn, orig_dport, &t_key, conn_pid->id, k_lw_thread_none, &req->tp);
-    req->parent_status = found;
 
     bpf_dbg_printk("looking up client trace info, found: %d", found);
-    if (found) {
-        urand_bytes(req->tp.span_id, SPAN_ID_SIZE_BYTES);
+    if (found == k_parent_status_root) {
+        // Adopted a thread-root placeholder: span_id was already assigned
+        req->parent_status = k_parent_status_live;
     } else {
-        init_new_trace(&req->tp);
+        req->parent_status = found;
+        if (found) {
+            urand_bytes(req->tp.span_id, SPAN_ID_SIZE_BYTES);
+        } else {
+            init_new_trace(&req->tp);
+        }
     }
 }
 

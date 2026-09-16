@@ -122,6 +122,15 @@ func collectSymbols(f *elf.File, syms []elf.Symbol, collectors []symbolCollector
 			continue
 		}
 
+		// Undefined symbols are imports satisfied by another object at load
+		// time (e.g. _ssl.so importing SSL_read from libssl.so). They carry
+		// no code here: value and size are zero, and attaching to the
+		// resulting offset 0 would probe the ELF header. The defining
+		// library is instrumented through its own probe group.
+		if s.Section == elf.SHN_UNDEF {
+			continue
+		}
+
 		var sym *Sym
 		for _, collector := range collectors {
 			key, ok := collector.matches(s.Name, collector.symbolNames)

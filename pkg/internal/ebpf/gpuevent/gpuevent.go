@@ -128,6 +128,10 @@ func (p *Tracer) Tracepoints() map[string]ebpfcommon.ProbeDesc {
 	return nil
 }
 
+func (p *Tracer) RawTracepoints() map[string]ebpfcommon.ProbeDesc {
+	return nil
+}
+
 func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
 	return map[string]map[string][]*ebpfcommon.ProbeDesc{
 		"libcudart.so": {

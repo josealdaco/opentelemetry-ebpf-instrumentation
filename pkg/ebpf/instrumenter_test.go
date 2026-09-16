@@ -683,7 +683,7 @@ func TestUprobeModulesRespectsVersionedLibraryAnnotations(t *testing.T) {
 		},
 	}
 
-	modules := i.uprobeModules(&tracer, 123, maps, "/proc/123/exe", 42, slog.Default())
+	modules, _ := i.uprobeModules(&tracer, 123, maps, "/proc/123/exe", 42, slog.Default())
 
 	require.Len(t, modules, 1)
 	module := modules[42]
@@ -1154,6 +1154,7 @@ func (s *stubTracer) AddCloser(...io.Closer)                                 {}
 func (s *stubTracer) SetupTailCalls()                                        {}
 func (s *stubTracer) KProbes() map[string]ebpfcommon.ProbeDesc               { return nil }
 func (s *stubTracer) Tracepoints() map[string]ebpfcommon.ProbeDesc           { return nil }
+func (s *stubTracer) RawTracepoints() map[string]ebpfcommon.ProbeDesc        { return nil }
 func (s *stubTracer) GoProbes() map[string][]*ebpfcommon.ProbeDesc           { return s.goProbes }
 func (s *stubTracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc { return s.uprobes }
 func (s *stubTracer) USDTProbes() map[string][]*ebpfcommon.USDTProbeDesc     { return nil }

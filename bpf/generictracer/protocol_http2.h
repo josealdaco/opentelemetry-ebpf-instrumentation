@@ -318,7 +318,8 @@ static __always_inline void http2_grpc_start(void *ctx,
     }
     u8 found_tp =
         find_trace_for_client_request(&s_key->pid_conn, orig_dport, k_lw_thread_none, &tp_p->tp);
-    h2g_info->parent_status = found_tp;
+    // Root adoption already assigned span_id inside the finder
+    h2g_info->parent_status = (found_tp == k_parent_status_root) ? k_parent_status_live : found_tp;
     if (adopt_injected_trace(s_key, &tp_p->tp)) {
         // the uprobe's context comes from the running request itself
         h2g_info->parent_status = k_parent_status_live;

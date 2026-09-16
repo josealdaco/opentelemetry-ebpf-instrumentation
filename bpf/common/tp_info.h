@@ -32,6 +32,10 @@ enum parent_status : u8 {
     // response is under way only its content says where it ends, so userspace
     // settles the link against the parent span's real end timestamp
     k_parent_status_conditional = 2,
+    // BPF-internal only, normalized to live before reaching userspace: the
+    // span adopted a thread-root placeholder and became the root itself, so
+    // its span_id was already assigned and must not be regenerated
+    k_parent_status_root = 3,
 };
 
 _Static_assert(k_parent_status_conditional == 2,

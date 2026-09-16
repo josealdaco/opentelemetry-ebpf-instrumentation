@@ -456,33 +456,54 @@ func (p *Tracer) Tracepoints() map[string]ebpfcommon.ProbeDesc {
 	return nil
 }
 
+func (p *Tracer) RawTracepoints() map[string]ebpfcommon.ProbeDesc {
+	return map[string]ebpfcommon.ProbeDesc{
+		"task_newtask": {
+			Required: false,
+			Start:    p.bpfObjects.ObiRawTracepointTaskNewtask,
+		},
+	}
+}
+
 func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
 	m := map[string]map[string][]*ebpfcommon.ProbeDesc{
 		"libssl.so": {
+			// KernelUretprobe on the read/write probes: OpenSSL 1.0.x builds
+			// compile SSL_read/SSL_write as indirect tail-call wrappers
+			// (return s->method->ssl_read(...)), so the hot path exits via
+			// `br` and the only RET is a cold error path. RET-offset return
+			// probes attach there and never fire; the kernel trampoline
+			// mechanism catches the return regardless of the exit instruction.
+			// Safe for C libraries (never used for Go probes).
 			"SSL_read": {{
-				Required: false,
-				Start:    p.bpfObjects.ObiUprobeSslRead,
-				End:      p.bpfObjects.ObiUretprobeSslRead,
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslRead,
+				End:             p.bpfObjects.ObiUretprobeSslRead,
+				KernelUretprobe: true,
 			}},
 			"SSL_write": {{
-				Required: false,
-				Start:    p.bpfObjects.ObiUprobeSslWrite,
-				End:      p.bpfObjects.ObiUretprobeSslWrite,
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslWrite,
+				End:             p.bpfObjects.ObiUretprobeSslWrite,
+				KernelUretprobe: true,
 			}},
 			"SSL_read_ex": {{
-				Required: false,
-				Start:    p.bpfObjects.ObiUprobeSslReadEx,
-				End:      p.bpfObjects.ObiUretprobeSslReadEx,
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslReadEx,
+				End:             p.bpfObjects.ObiUretprobeSslReadEx,
+				KernelUretprobe: true,
 			}},
 			"SSL_write_ex2": {{
-				Required: false,
-				Start:    p.bpfObjects.ObiUprobeSslWriteEx2,
-				End:      p.bpfObjects.ObiUretprobeSslWriteEx2,
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslWriteEx2,
+				End:             p.bpfObjects.ObiUretprobeSslWriteEx2,
+				KernelUretprobe: true,
 			}},
 			"SSL_write_ex": {{
-				Required: false,
-				Start:    p.bpfObjects.ObiUprobeSslWriteEx,
-				End:      p.bpfObjects.ObiUretprobeSslWriteEx,
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslWriteEx,
+				End:             p.bpfObjects.ObiUretprobeSslWriteEx,
+				KernelUretprobe: true,
 			}},
 			"SSL_shutdown": {{
 				Required: false,
@@ -491,6 +512,12 @@ func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
 			"SSL_set_bio": {{
 				Required: false,
 				Start:    p.bpfObjects.ObiUprobeSslSetBio,
+			}},
+			// OpenSSL 1.0.x clients (e.g. CPython 2.7 _ssl.c) wire their
+			// sockets with SSL_set_fd and never call SSL_set_bio
+			"SSL_set_fd": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeSslSetFd,
 			}},
 			"SSL_free": {{
 				Required: false,
@@ -503,6 +530,122 @@ func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
 		// as node resolve both keys to the executable and are grouped into a
 		// single attachment by inode.
 		"libcrypto.so": {
+			"BIO_write": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeBioWrite,
+			}},
+		},
+		// Python's cryptography package (the TLS backend behind pyOpenSSL and
+		// urllib3.contrib.pyopenssl) does not link the system libssl: its CFFI
+		// module _openssl.abi3.so statically links both libssl and libcrypto,
+		// so every SSL_* and BIO_write symbol resolves from this object. The
+		// module is dlopen'ed on first import, often long after attach: the
+		// deferred uprobe retry picks it up when it appears in the maps.
+		"_openssl": {
+			"SSL_read": {{
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslRead,
+				End:             p.bpfObjects.ObiUretprobeSslRead,
+				KernelUretprobe: true,
+			}},
+			"SSL_write": {{
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslWrite,
+				End:             p.bpfObjects.ObiUretprobeSslWrite,
+				KernelUretprobe: true,
+			}},
+			"SSL_read_ex": {{
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslReadEx,
+				End:             p.bpfObjects.ObiUretprobeSslReadEx,
+				KernelUretprobe: true,
+			}},
+			"SSL_write_ex2": {{
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslWriteEx2,
+				End:             p.bpfObjects.ObiUretprobeSslWriteEx2,
+				KernelUretprobe: true,
+			}},
+			"SSL_write_ex": {{
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslWriteEx,
+				End:             p.bpfObjects.ObiUretprobeSslWriteEx,
+				KernelUretprobe: true,
+			}},
+			"SSL_shutdown": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeSslShutdown,
+			}},
+			"SSL_set_bio": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeSslSetBio,
+			}},
+			"SSL_set_fd": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeSslSetFd,
+			}},
+			"SSL_free": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeSslFree,
+			}},
+			"BIO_write": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeBioWrite,
+			}},
+		},
+		// CPython's stdlib ssl module (_ssl.so / _ssl.cpython-*.so). Usually it
+		// dynamically links the system libssl (covered by the libssl.so group),
+		// but pyenv/conda/vendor Python builds may statically link OpenSSL into
+		// the module itself, in which case the SSL_* symbols resolve from here.
+		// Like _openssl, it is dlopen'ed on first "import ssl": the deferred
+		// uprobe retry picks it up when it appears in the maps.
+		"_ssl": {
+			"SSL_read": {{
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslRead,
+				End:             p.bpfObjects.ObiUretprobeSslRead,
+				KernelUretprobe: true,
+			}},
+			"SSL_write": {{
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslWrite,
+				End:             p.bpfObjects.ObiUretprobeSslWrite,
+				KernelUretprobe: true,
+			}},
+			"SSL_read_ex": {{
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslReadEx,
+				End:             p.bpfObjects.ObiUretprobeSslReadEx,
+				KernelUretprobe: true,
+			}},
+			"SSL_write_ex2": {{
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslWriteEx2,
+				End:             p.bpfObjects.ObiUretprobeSslWriteEx2,
+				KernelUretprobe: true,
+			}},
+			"SSL_write_ex": {{
+				Required:        false,
+				Start:           p.bpfObjects.ObiUprobeSslWriteEx,
+				End:             p.bpfObjects.ObiUretprobeSslWriteEx,
+				KernelUretprobe: true,
+			}},
+			"SSL_shutdown": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeSslShutdown,
+			}},
+			"SSL_set_bio": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeSslSetBio,
+			}},
+			"SSL_set_fd": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeSslSetFd,
+			}},
+			"SSL_free": {{
+				Required: false,
+				Start:    p.bpfObjects.ObiUprobeSslFree,
+			}},
 			"BIO_write": {{
 				Required: false,
 				Start:    p.bpfObjects.ObiUprobeBioWrite,

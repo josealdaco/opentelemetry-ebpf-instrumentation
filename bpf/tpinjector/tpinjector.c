@@ -184,7 +184,7 @@ typedef struct tailcall_ctx {
     u8 niter;                     // HTTP/1 find-existing scan iteration counter
     u8 h2_frames;                 // H2 frames already injected this packet (capped)
     u8 h2_tp_retries;             // malformed HPACK traceparent candidates retried this packet
-    bool has_parent_tp;           // true if parent_tp holds a valid context
+    u8 has_parent_tp;             // parent_status: nonzero if parent_tp holds a valid context
     bool go_grpc_conn;            // Go gRPC egress: use uprobe-stored tps, never create
     bool tp_present;              // frame already carries a traceparent we cannot adopt
     bool scan_exhausted;          // retry budget ran out before the block was walked
@@ -492,7 +492,17 @@ static __always_inline bool create_trace_info(const tailcall_ctx *t_ctx, tp_info
     tp_p->pid = t_ctx->p_conn.pid;
     tp_p->req_type = k_event_type_http_client;
 
-    if (t_ctx->has_parent_tp) {
+    if (t_ctx->has_parent_tp == k_parent_status_root) {
+        bpf_dbg_printk("adopting thread-root tp info");
+
+        // The parent was a thread-root placeholder: this span becomes the
+        // root of the thread's trace. The adoption in find_parent_trace_for_
+        // client_request_with_t_key already assigned the span_id (and
+        // promoted it into server_traces), so reuse it and set no parent_id.
+        __builtin_memcpy(tp_p->tp.trace_id, t_ctx->parent_tp.trace_id, sizeof(tp_p->tp.trace_id));
+        __builtin_memcpy(tp_p->tp.span_id, t_ctx->parent_tp.span_id, sizeof(tp_p->tp.span_id));
+        __builtin_memset(tp_p->tp.parent_id, 0, sizeof(tp_p->tp.parent_id));
+    } else if (t_ctx->has_parent_tp) {
         bpf_dbg_printk("found existing tp info");
 
         __builtin_memcpy(tp_p->tp.trace_id, t_ctx->parent_tp.trace_id, sizeof(tp_p->tp.trace_id));

@@ -23,6 +23,7 @@
 #include <maps/fd_to_connection.h>
 #include <maps/java_tasks.h>
 #include <maps/java_vt_threads.h>
+#include <maps/newtask_map.h>
 #include <maps/nginx_upstream.h>
 #include <maps/nodejs_fd_map.h>
 #include <maps/puma_tasks.h>
@@ -31,6 +32,10 @@
 #include <maps/tp_info_mem.h>
 
 static __always_inline enum parent_status parent_kind(const tp_info_pid_t *server_tp) {
+    bpf_dbg_printk("(DEBUG)parent_kind: req_type=%d, response_sent=%d, high_request_volume=%d",
+                   server_tp->req_type,
+                   server_tp->response_sent,
+                   high_request_volume);
     if (server_tp->req_type == k_event_type_tcp_request) {
         return k_parent_status_conditional;
     }
@@ -130,6 +135,9 @@ static __always_inline tp_info_pid_t *find_parent_process_trace(trace_key_t *t_k
     // Up to 5 levels of thread nesting allowed
     enum { k_max_depth = 5 };
 
+    // Save the original key so the second loop can restart from it
+    const pid_key_t original_p_key = t_key->p_key;
+
     for (u8 i = 0; i < k_max_depth; ++i) {
         tp_info_pid_t *server_tp = bpf_map_lookup_elem(&server_traces, t_key);
 
@@ -140,6 +148,10 @@ static __always_inline tp_info_pid_t *find_parent_process_trace(trace_key_t *t_k
                            t_key->extra_id);
             return server_tp;
         }
+        bpf_dbg_printk("(Server Process)No parent trace for pid=%d, ns=%lx, extra_id=%llx",
+                       t_key->p_key.pid,
+                       t_key->p_key.ns,
+                       t_key->extra_id);
 
         // not this goroutine running the server request processing
         // Let's find the parent scope
@@ -148,9 +160,50 @@ static __always_inline tp_info_pid_t *find_parent_process_trace(trace_key_t *t_k
         if (!p_tid) {
             break;
         }
+        bpf_dbg_printk("(Server Process)Found parent tid=%d, ns=%lx, pid=%d",
+                       p_tid->tid,
+                       p_tid->ns,
+                       p_tid->pid);
 
         // Lookup now to see if the parent was a request
         t_key->p_key = *p_tid;
+    }
+
+    // Second pass: walk the newtask_map (child -> parent) to find a parent trace
+    t_key->p_key = original_p_key;
+
+    for (u8 i = 0; i < k_max_depth; ++i) {
+        const pid_key_t *newtask_parent =
+            (const pid_key_t *)bpf_map_lookup_elem(&newtask_map, &t_key->p_key);
+
+        if (!newtask_parent) {
+            bpf_dbg_printk("(NewTask)No newtask entry for pid=%d, tid=%d, ns=%lx",
+                           t_key->p_key.pid,
+                           t_key->p_key.tid,
+                           t_key->p_key.ns);
+            break;
+        }
+
+        bpf_dbg_printk("(NewTask)Found parent tid=%d, ns=%lx, pid=%d",
+                       newtask_parent->tid,
+                       newtask_parent->ns,
+                       newtask_parent->pid);
+
+        // Move up to the parent and check if it has a trace in server_traces
+        t_key->p_key = *newtask_parent;
+
+        tp_info_pid_t *server_tp = bpf_map_lookup_elem(&server_traces, t_key);
+        if (server_tp) {
+            bpf_dbg_printk("(NewTask)Found server trace for pid=%d, tid=%d, ns=%lx",
+                           t_key->p_key.pid,
+                           t_key->p_key.tid,
+                           t_key->p_key.ns);
+            return server_tp;
+        }
+
+        bpf_dbg_printk("(NewTask)No server trace for parent pid=%d, tid=%d",
+                       t_key->p_key.pid,
+                       t_key->p_key.tid);
     }
 
     return NULL;
@@ -215,7 +268,11 @@ static __always_inline tp_info_pid_t *find_python_parent_trace(const trace_key_t
 static __always_inline tp_info_pid_t *find_parent_java_trace(trace_key_t *t_key) {
     // Up to 3 levels of thread nesting allowed
     enum { k_max_depth = 3 };
-
+    bpf_dbg_printk("(Java): Looking up parent trace for pid=%d, ns=%lx, extra_id=%llx",
+                   t_key->p_key.pid,
+                   t_key->p_key.ns,
+                   t_key->extra_id);
+    bpf_dbg_printk("(Java) Thread ID: %d", t_key->p_key.tid);
     for (u8 i = 0; i < k_max_depth; ++i) {
         tp_info_pid_t *server_tp = bpf_map_lookup_elem(&server_traces, t_key);
 
@@ -224,6 +281,8 @@ static __always_inline tp_info_pid_t *find_parent_java_trace(trace_key_t *t_key)
                            t_key->p_key.pid,
                            t_key->p_key.ns,
                            t_key->extra_id);
+            // Also print out the tid of the parent trace for debugging
+            bpf_dbg_printk("(Java)Found parent trace for tid=%d", t_key->p_key.tid);
             return server_tp;
         }
 
@@ -294,7 +353,15 @@ static __always_inline tp_info_pid_t *find_parent_trace(const pid_connection_inf
                                                         trace_key_t *t_key,
                                                         u16 orig_dport) {
     tp_info_pid_t *node_tp = find_nodejs_parent_trace(p_conn, orig_dport, pid_tgid);
+    bpf_dbg_printk("find_parent_trace: node_tp=%llx", node_tp);
+    bpf_dbg_printk("find_parent_trace: pid=%d, ns=%lx, extra_id=%llx",
+                   t_key->p_key.pid,
+                   t_key->p_key.ns,
+                   t_key->extra_id);
+    bpf_dbg_printk("find_parent_trace: ptid=%d", t_key->p_key.tid);
 
+    bpf_dbg_printk("find_parent_trace: lw_thread=%llx", lw_thread);
+    bpf_dbg_printk("find_parent_trace: orig_dport=%d", orig_dport);
     if (node_tp) {
         return node_tp;
     }
@@ -362,6 +429,30 @@ find_trace_for_client_request_with_t_key(const pid_connection_info_t *p_conn,
     if (server_tp && server_tp->valid && valid_trace(server_tp->tp.trace_id)) {
         bpf_dbg_printk("Found existing server tp for client call");
 
+        // Thread-root placeholder registered at task_newtask: this first
+        // operation adopts it and becomes the exported root span of the
+        // thread's trace. Checked before the transaction-time gate, since the
+        // thread may have been created long before its first operation.
+        if (server_tp->req_type == k_event_type_thread_root) {
+            __builtin_memcpy(tp->trace_id, server_tp->tp.trace_id, sizeof(tp->trace_id));
+            __builtin_memset(tp->parent_id, 0, sizeof(tp->parent_id));
+            urand_bytes(tp->span_id, SPAN_ID_SIZE_BYTES);
+
+            // Promote the placeholder: subsequent operations on this thread
+            // parent to this first span (a real, exported span)
+            __builtin_memcpy(server_tp->tp.span_id, tp->span_id, sizeof(server_tp->tp.span_id));
+            server_tp->tp.ts = tp->ts;
+            server_tp->req_type = k_event_type_http_request;
+
+            bpf_dbg_printk("Thread-root adopted by first operation");
+            bpf_dbg_printk("pid: %d, ns: %lx, extra_id: %llx",
+                           t_key->p_key.pid,
+                           t_key->p_key.ns,
+                           t_key->extra_id);
+            bpf_dbg_printk("tid: %d", t_key->p_key.tid);
+            return k_parent_status_root;
+        }
+
         if (!should_be_in_same_transaction(&server_tp->tp, tp)) {
             bpf_dbg_printk("Parent and child are too far apart, discarding the parent trace");
             bpf_dbg_printk(
@@ -404,6 +495,25 @@ find_parent_trace_for_client_request_with_t_key(const pid_connection_info_t *p_c
 
     if (server_tp && server_tp->valid && valid_trace(server_tp->tp.trace_id)) {
         bpf_dbg_printk("Found existing server tp for client call");
+
+        // Thread-root placeholder registered at task_newtask: this first
+        // operation adopts it and becomes the exported root span of the
+        // thread's trace. Checked before the transaction-time gate, since the
+        // thread may have been created long before its first operation.
+        if (server_tp->req_type == k_event_type_thread_root) {
+            __builtin_memcpy(tp->trace_id, server_tp->tp.trace_id, sizeof(tp->trace_id));
+            __builtin_memset(tp->parent_id, 0, sizeof(tp->parent_id));
+            urand_bytes(tp->span_id, SPAN_ID_SIZE_BYTES);
+
+            // Promote the placeholder: subsequent operations on this thread
+            // parent to this first span (a real, exported span)
+            __builtin_memcpy(server_tp->tp.span_id, tp->span_id, sizeof(server_tp->tp.span_id));
+            server_tp->tp.ts = tp->ts;
+            server_tp->req_type = k_event_type_http_request;
+
+            bpf_dbg_printk("Thread-root adopted by first operation");
+            return k_parent_status_root;
+        }
 
         if (!should_be_in_same_transaction(&server_tp->tp, tp)) {
             bpf_dbg_printk("Parent and child are too far apart, discarding the parent trace");
