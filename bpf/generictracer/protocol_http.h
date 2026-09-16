@@ -694,7 +694,9 @@ __obi_continue_protocol_http(struct pt_regs *ctx,
             __builtin_memcpy(&p_conn.conn, &args->pid_conn.conn, sizeof(connection_info_t));
             found_tp = find_trace_for_client_request(
                 &p_conn, args->orig_dport, args->lw_thread, &tp_p->tp);
-            info->parent_status = found_tp;
+            // Root adoption already assigned span_id inside the finder
+            info->parent_status =
+                (found_tp == k_parent_status_root) ? k_parent_status_live : found_tp;
         } else {
             //bpf_dbg_printk("Looking up existing trace for connection");
             //dbg_print_http_connection_info(conn);

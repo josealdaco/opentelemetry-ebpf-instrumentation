@@ -683,7 +683,7 @@ func TestUprobeModulesRespectsVersionedLibraryAnnotations(t *testing.T) {
 		},
 	}
 
-	modules := i.uprobeModules(&tracer, 123, maps, "/proc/123/exe", 42, slog.Default())
+	modules, _ := i.uprobeModules(&tracer, 123, maps, "/proc/123/exe", 42, slog.Default())
 
 	require.Len(t, modules, 1)
 	module := modules[42]

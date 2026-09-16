@@ -32,6 +32,10 @@
 #include <maps/tp_info_mem.h>
 
 static __always_inline enum parent_status parent_kind(const tp_info_pid_t *server_tp) {
+    bpf_dbg_printk("(DEBUG)parent_kind: req_type=%d, response_sent=%d, high_request_volume=%d",
+                   server_tp->req_type,
+                   server_tp->response_sent,
+                   high_request_volume);
     if (server_tp->req_type == k_event_type_tcp_request) {
         return k_parent_status_conditional;
     }
@@ -264,7 +268,11 @@ static __always_inline tp_info_pid_t *find_python_parent_trace(const trace_key_t
 static __always_inline tp_info_pid_t *find_parent_java_trace(trace_key_t *t_key) {
     // Up to 3 levels of thread nesting allowed
     enum { k_max_depth = 3 };
-
+    bpf_dbg_printk("(Java): Looking up parent trace for pid=%d, ns=%lx, extra_id=%llx",
+                   t_key->p_key.pid,
+                   t_key->p_key.ns,
+                   t_key->extra_id);
+    bpf_dbg_printk("(Java) Thread ID: %d", t_key->p_key.tid);
     for (u8 i = 0; i < k_max_depth; ++i) {
         tp_info_pid_t *server_tp = bpf_map_lookup_elem(&server_traces, t_key);
 
@@ -421,6 +429,30 @@ find_trace_for_client_request_with_t_key(const pid_connection_info_t *p_conn,
     if (server_tp && server_tp->valid && valid_trace(server_tp->tp.trace_id)) {
         bpf_dbg_printk("Found existing server tp for client call");
 
+        // Thread-root placeholder registered at task_newtask: this first
+        // operation adopts it and becomes the exported root span of the
+        // thread's trace. Checked before the transaction-time gate, since the
+        // thread may have been created long before its first operation.
+        if (server_tp->req_type == k_event_type_thread_root) {
+            __builtin_memcpy(tp->trace_id, server_tp->tp.trace_id, sizeof(tp->trace_id));
+            __builtin_memset(tp->parent_id, 0, sizeof(tp->parent_id));
+            urand_bytes(tp->span_id, SPAN_ID_SIZE_BYTES);
+
+            // Promote the placeholder: subsequent operations on this thread
+            // parent to this first span (a real, exported span)
+            __builtin_memcpy(server_tp->tp.span_id, tp->span_id, sizeof(server_tp->tp.span_id));
+            server_tp->tp.ts = tp->ts;
+            server_tp->req_type = k_event_type_http_request;
+
+            bpf_dbg_printk("Thread-root adopted by first operation");
+            bpf_dbg_printk("pid: %d, ns: %lx, extra_id: %llx",
+                           t_key->p_key.pid,
+                           t_key->p_key.ns,
+                           t_key->extra_id);
+            bpf_dbg_printk("tid: %d", t_key->p_key.tid);
+            return k_parent_status_root;
+        }
+
         if (!should_be_in_same_transaction(&server_tp->tp, tp)) {
             bpf_dbg_printk("Parent and child are too far apart, discarding the parent trace");
             bpf_dbg_printk(
@@ -463,6 +495,25 @@ find_parent_trace_for_client_request_with_t_key(const pid_connection_info_t *p_c
 
     if (server_tp && server_tp->valid && valid_trace(server_tp->tp.trace_id)) {
         bpf_dbg_printk("Found existing server tp for client call");
+
+        // Thread-root placeholder registered at task_newtask: this first
+        // operation adopts it and becomes the exported root span of the
+        // thread's trace. Checked before the transaction-time gate, since the
+        // thread may have been created long before its first operation.
+        if (server_tp->req_type == k_event_type_thread_root) {
+            __builtin_memcpy(tp->trace_id, server_tp->tp.trace_id, sizeof(tp->trace_id));
+            __builtin_memset(tp->parent_id, 0, sizeof(tp->parent_id));
+            urand_bytes(tp->span_id, SPAN_ID_SIZE_BYTES);
+
+            // Promote the placeholder: subsequent operations on this thread
+            // parent to this first span (a real, exported span)
+            __builtin_memcpy(server_tp->tp.span_id, tp->span_id, sizeof(server_tp->tp.span_id));
+            server_tp->tp.ts = tp->ts;
+            server_tp->req_type = k_event_type_http_request;
+
+            bpf_dbg_printk("Thread-root adopted by first operation");
+            return k_parent_status_root;
+        }
 
         if (!should_be_in_same_transaction(&server_tp->tp, tp)) {
             bpf_dbg_printk("Parent and child are too far apart, discarding the parent trace");

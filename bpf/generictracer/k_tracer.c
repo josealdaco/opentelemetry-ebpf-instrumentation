@@ -411,6 +411,13 @@ int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_connect, int res) {
 
         bpf_map_update_elem(&pid_tid_to_conn, &id, &info, BPF_ANY); // Support SSL lookup
 
+        // Client-side fd mapping, mirroring the accept path: OpenSSL 1.0.x
+        // clients (e.g. CPython 2.7 wrapping an outgoing socket for HTTPS)
+        // wire the socket with SSL_set_fd right after connect, and the
+        // SSL_set_fd uprobe resolves the connection through this map.
+        const fd_key fkey = {.pid_tgid = id, .fd = args->fd};
+        bpf_map_update_elem(&fd_to_connection, &fkey, &info.p_conn.conn, BPF_ANY);
+
         setup_cp_support_conn_info(&info.p_conn, true);
 
         // connect() returning 0 means the handshake completed, so the socket
@@ -1276,7 +1283,7 @@ typedef struct sock_tailcall_ctx {
     protocol_info_t tcp;
     egress_key_t e_key;
     u8 niter;
-    bool has_parent_tp;
+    u8 has_parent_tp;
     u8 pad[2];
 } sock_tailcall_ctx;
 
@@ -1550,12 +1557,12 @@ int BPF_PROG(obi_raw_tracepoint_task_newtask, struct task_struct *task, u64 clon
     tp_info_pid_t child_tp = {0};
     child_tp.valid = 1;
     child_tp.pid = child_p_key.pid;
-    child_tp.req_type = k_event_type_http_request;
-    child_tp.tp.ts = bpf_ktime_get_ns();
-    child_tp.tp.flags = 1;
-    urand_bytes(child_tp.tp.trace_id, TRACE_ID_SIZE_BYTES);
-    urand_bytes(child_tp.tp.span_id, SPAN_ID_SIZE_BYTES);
-
+    // Placeholder root context: the first operation on this thread adopts it
+    // (becomes the exported root span) and the entry is then promoted to a
+    // regular live parent, so subsequent operations attach to that first span
+    child_tp.req_type = k_event_type_thread_root;
+    // Root span: new trace_id/span_id, zeroed parent_id, ts and sampled flag
+    init_new_trace(&child_tp.tp);
     trace_key_t child_trace_key = {
         .extra_id = 0,
         .p_key = child_p_key,

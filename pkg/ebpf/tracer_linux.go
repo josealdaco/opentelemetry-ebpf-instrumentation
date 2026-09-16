@@ -43,6 +43,7 @@ type instrumenter struct {
 	optionalGoProbeGroupClosers []io.Closer
 	processScopedGoProbes       []processScopedGoProbeRegistration
 	modules                     map[uint64]struct{}
+	modulesMu                   sync.Mutex
 	metrics                     imetrics.Reporter
 	processName                 string
 }

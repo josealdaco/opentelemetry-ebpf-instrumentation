@@ -163,6 +163,13 @@ type ProbeDesc struct {
 
 	// Skip is set when an optional uprobe symbol was not resolved.
 	Skip bool
+
+	// KernelUretprobe makes End attach as a genuine kernel uretprobe at the
+	// symbol start instead of uprobes at ReturnOffsets. Set for shared C
+	// library probes when RET-offset discovery fails (tail-called wrappers,
+	// pointer-authenticated returns, symbols without size). Never set for Go
+	// probes: kernel uretprobes are unsafe with the Go runtime's stack moves.
+	KernelUretprobe bool
 }
 
 // GoProbe associates an ordered Go symbol with the eBPF program attached to it.

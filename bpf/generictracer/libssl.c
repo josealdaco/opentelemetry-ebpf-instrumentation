@@ -8,6 +8,7 @@
 
 #include <common/algorithm.h>
 #include <common/preempt_guard.h>
+#include <common/ssl_helpers.h>
 
 #include <generictracer/ssl_defs.h>
 #include <generictracer/tls_prefix.h>
@@ -16,6 +17,7 @@
 
 #include <maps/active_ssl_read_args.h>
 #include <maps/active_ssl_write_args.h>
+#include <maps/fd_to_connection.h>
 
 #include <pid/pid.h>
 
@@ -37,7 +39,7 @@ int BPF_UPROBE_GUARDED(obi_uprobe_ssl_read, void *ssl, const void *buf, int num)
         return 0;
     }
 
-    bpf_dbg_printk("=== uprobe SSL_read id=%d ssl=%llx ===", id, ssl);
+    bpf_dbg_printk("=== uprobe SSL_read id=%d tid=%d ssl=%llx ===", id, (u32)id, ssl);
 
     ssl_pid_connection_info_t *s_conn = bpf_map_lookup_elem(&ssl_to_conn, &ssl);
     if (s_conn) {
@@ -66,7 +68,7 @@ int BPF_URETPROBE_GUARDED(obi_uretprobe_ssl_read, int ret) {
         return 0;
     }
 
-    bpf_dbg_printk("=== uretprobe SSL_read id=%d ===", id);
+    bpf_dbg_printk("=== uretprobe SSL_read id=%d tid=%d ===", id, (u32)id);
 
     ssl_args_t *args = bpf_map_lookup_elem(&active_ssl_read_args, &id);
 
@@ -92,7 +94,7 @@ int BPF_UPROBE_GUARDED(obi_uprobe_ssl_read_ex,
         return 0;
     }
 
-    bpf_dbg_printk("=== SSL_read_ex id=%d ssl=%llx ===", id, ssl);
+    bpf_dbg_printk("=== SSL_read_ex id=%d tid=%d ssl=%llx ===", id, (u32)id, ssl);
 
     ssl_pid_connection_info_t *s_conn = bpf_map_lookup_elem(&ssl_to_conn, &ssl);
     if (s_conn) {
@@ -122,7 +124,7 @@ int BPF_URETPROBE_GUARDED(obi_uretprobe_ssl_read_ex, int ret) {
         return 0;
     }
 
-    bpf_dbg_printk("=== uretprobe SSL_read_ex id=%d ===", id);
+    bpf_dbg_printk("=== uretprobe SSL_read_ex id=%d tid=%d ===", id, (u32)id);
 
     ssl_args_t *args = bpf_map_lookup_elem(&active_ssl_read_args, &id);
 
@@ -161,7 +163,7 @@ int BPF_UPROBE_GUARDED(obi_uprobe_ssl_write, void *ssl, const void *buf, int num
         return 0;
     }
 
-    bpf_dbg_printk("=== uprobe SSL_write id=%d ssl=%llx ===", id, ssl);
+    bpf_dbg_printk("=== uprobe SSL_write id=%d tid=%d ssl=%llx ===", id, (u32)id, ssl);
 
     ssl_args_t args = {};
     args.buf = (u64)buf;
@@ -183,7 +185,7 @@ int BPF_URETPROBE_GUARDED(obi_uretprobe_ssl_write, int ret) {
 
     ssl_args_t *args = bpf_map_lookup_elem(&active_ssl_write_args, &id);
 
-    bpf_dbg_printk("=== uretprobe SSL_write id=%d args %llx ===", id, args);
+    bpf_dbg_printk("=== uretprobe SSL_write id=%d tid=%d args %llx ===", id, (u32)id, args);
 
     if (args) {
         ssl_args_t saved = {};
@@ -211,7 +213,7 @@ int BPF_UPROBE_GUARDED(obi_uprobe_ssl_write_ex,
         return 0;
     }
 
-    bpf_dbg_printk("=== SSL_write_ex id=%d ssl=%llx ===", id, ssl);
+    bpf_dbg_printk("=== SSL_write_ex id=%d tid=%d ssl=%llx ===", id, (u32)id, ssl);
 
     ssl_args_t args = {};
     args.buf = (u64)buf;
@@ -241,7 +243,7 @@ int BPF_UPROBE_GUARDED(obi_uprobe_ssl_write_ex2,
         return 0;
     }
 
-    bpf_dbg_printk("=== SSL_write_ex2 id=%d ssl=%llx ===", id, ssl);
+    bpf_dbg_printk("=== SSL_write_ex2 id=%d tid=%d ssl=%llx ===", id, (u32)id, ssl);
 
     ssl_args_t args = {};
     args.buf = (u64)buf;
@@ -264,7 +266,7 @@ int BPF_URETPROBE_GUARDED(obi_uretprobe_ssl_write_ex, int ret) {
 
     ssl_args_t *args = bpf_map_lookup_elem(&active_ssl_write_args, &id);
 
-    bpf_dbg_printk("=== uretprobe SSL_write_ex id=%d args %llx ===", id, args);
+    bpf_dbg_printk("=== uretprobe SSL_write_ex id=%d tid=%d args %llx ===", id, (u32)id, args);
 
     if (ret != 1 || !args) {
         bpf_map_delete_elem(&active_ssl_write_args, &id);
@@ -293,7 +295,7 @@ int BPF_URETPROBE_GUARDED(obi_uretprobe_ssl_write_ex2, int ret) {
 
     ssl_args_t *args = bpf_map_lookup_elem(&active_ssl_write_args, &id);
 
-    bpf_dbg_printk("=== uretprobe SSL_write_ex2 id=%d args %llx ===", id, args);
+    bpf_dbg_printk("=== uretprobe SSL_write_ex2 id=%d tid=%d args %llx ===", id, (u32)id, args);
 
     if (ret != 1 || !args) {
         bpf_map_delete_elem(&active_ssl_write_args, &id);
@@ -322,7 +324,7 @@ int BPF_UPROBE_GUARDED(obi_uprobe_ssl_shutdown, void *s) {
         return 0;
     }
 
-    bpf_dbg_printk("=== SSL_shutdown id=%d ssl=%llx ===", id, s);
+    bpf_dbg_printk("=== SSL_shutdown id=%d tid=%d ssl=%llx ===", id, (u32)id, s);
 
     ssl_release_connection_state(id, s);
     ssl_release_thread_state(id);
@@ -348,10 +350,70 @@ int BPF_UPROBE_GUARDED(obi_uprobe_ssl_set_bio, void *ssl, void *rbio, void *wbio
 
     // Split in two: bpf_trace_printk takes at most three arguments, and clang
     // silently switches to bpf_trace_vprintk beyond that, which needs 5.16.
-    bpf_dbg_printk("=== SSL_set_bio id=%d ssl=%llx ===", id, ssl);
+    bpf_dbg_printk("=== SSL_set_bio id=%d tid=%d ssl=%llx ===", id, (u32)id, ssl);
     bpf_dbg_printk("SSL_set_bio rbio=%llx wbio=%llx", rbio, wbio);
 
     ssl_bios_track(pid_from_pid_tgid(id), ssl, rbio, wbio);
+
+    return 0;
+}
+
+// Associates an SSL with the connection behind a raw file descriptor.
+//
+// CPython 2.7 (_ssl.c) wires its SSL objects with SSL_set_fd — memory BIO
+// support (and with it SSL_set_bio usage) only arrived in Python 3.5 — so the
+// SSL_set_bio probe above never fires there. The fd was already mapped to its
+// connection at socket setup time (fd_to_connection, populated by both
+// kretprobe/sys_accept4 and kretprobe/sys_connect), which lets us bind
+// ssl_to_conn here instead of waiting for the lazy kprobe correlation during
+// the first SSL_read/SSL_write.
+SEC("uprobe/libssl.so:SSL_set_fd")
+int BPF_UPROBE_GUARDED(obi_uprobe_ssl_set_fd, void *ssl, int fd) {
+    (void)ctx;
+
+    const u64 id = bpf_get_current_pid_tgid();
+    if (!valid_pid(id)) {
+        return 0;
+    }
+
+    // Split in two: bpf_trace_printk takes at most three arguments
+    bpf_dbg_printk("=== SSL_set_fd id=%d tid=%d ===", id, (u32)id);
+    bpf_dbg_printk("SSL_set_fd ssl=%llx fd=%d", ssl, fd);
+
+    // Resolve strictly through the fd being wired. A thread-keyed lookup
+    // (pid_tid_to_conn) must not be used here: event-loop servers like nginx
+    // multiplex many connections on one thread, and that entry holds the most
+    // recently accepted connection, not necessarily the one behind this fd.
+    const fd_key key = {.pid_tgid = id, .fd = fd};
+    connection_info_t *conn = bpf_map_lookup_elem(&fd_to_connection, &key);
+
+    if (!conn) {
+        bpf_dbg_printk("SSL_set_fd: no connection known for fd=%d yet tid=%d", fd, (u32)id);
+        return 0;
+    }
+
+    // Don't clobber an association already established elsewhere (handshake
+    // or read/write correlation), which carries an accurate orig_dport.
+    if (bpf_map_lookup_elem(&ssl_to_conn, &ssl)) {
+        bpf_dbg_printk("SSL_set_fd: ssl=%llx already bound, keeping it", ssl);
+        return 0;
+    }
+
+    ssl_pid_connection_info_t ssl_conn = {0};
+    ssl_conn.p_conn.pid = pid_from_pid_tgid(id);
+    __builtin_memcpy(&ssl_conn.p_conn.conn, conn, sizeof(connection_info_t));
+    ssl_conn.orig_dport = ssl_conn.p_conn.conn.d_port;
+    sort_connection_info(&ssl_conn.p_conn.conn);
+
+    // Bind only ssl_to_conn (payload attribution for the SSL path). Do NOT
+    // insert into active_ssl_connections here: fd_to_connection entries
+    // outlive closed sockets, so a reused fd number could mark an unrelated,
+    // possibly plaintext connection as TLS, making is_ssl_connection()
+    // suppress the kprobe parsers for it and dropping its spans entirely.
+    // The active flag is set by connect_ssl_to_connection() once real TLS
+    // I/O is observed on the socket during SSL_read/SSL_write.
+    bpf_dbg_printk("SSL_set_fd: binding ssl=%llx to fd connection", ssl);
+    bpf_map_update_elem(&ssl_to_conn, &ssl, &ssl_conn, BPF_ANY);
 
     return 0;
 }
@@ -370,7 +432,7 @@ int BPF_UPROBE_GUARDED(obi_uprobe_ssl_free, void *ssl) {
         return 0;
     }
 
-    bpf_dbg_printk("=== SSL_free id=%d ssl=%llx ===", id, ssl);
+    bpf_dbg_printk("=== SSL_free id=%d tid=%d ssl=%llx ===", id, (u32)id, ssl);
 
     // Node can free an SSL without shutting it down first, so this is the
     // reliable release point. Only SSL-keyed state goes here: this thread may

@@ -123,14 +123,35 @@ handle_ssl_buf(void *ctx, u64 id, ssl_args_t *args, int bytes_len, u8 direction)
             bpf_dbg_printk("SSL conn");
             dbg_print_http_connection_info(&conn->p_conn.conn);
 
+            // Key the event by the process actually doing the I/O, not by the
+            // one that created the socket: connections inherited across fork
+            // (or created by a pool manager process) carry the creator's pid,
+            // which would split the ongoing_http/ongoing_tcp_req key between
+            // the SSL path and the kprobe path and drop the span entirely.
+            ssl_pid_connection_info_t current = {};
+            __builtin_memcpy(&current, conn, sizeof(ssl_pid_connection_info_t));
+            const u32 host_pid = pid_from_pid_tgid(id);
+            if (current.p_conn.pid != host_pid) {
+                bpf_dbg_printk("SSL conn pid override %d -> %d", current.p_conn.pid, host_pid);
+
+                // Migrate the SSL flag to the new key: the kprobe path checks
+                // active_ssl_connections with the current pid, and a stale
+                // entry under the creator's pid would make is_ssl_connection()
+                // miss, sending this connection down the plain-TCP path.
+                bpf_map_delete_elem(&active_ssl_connections, &current.p_conn);
+                current.p_conn.pid = host_pid;
+                bpf_map_update_elem(&active_ssl_connections, &current.p_conn, &ssl, BPF_ANY);
+                bpf_map_update_elem(&ssl_to_conn, &ssl, &current, BPF_ANY);
+            }
+
             // must be last, doesn't return
             handle_buf_with_connection(ctx,
-                                       &conn->p_conn,
+                                       &current.p_conn,
                                        (void *)args->buf,
                                        bytes_len,
                                        WITH_SSL,
                                        direction,
-                                       conn->orig_dport);
+                                       current.orig_dport);
         } else {
             bpf_dbg_printk("No connection info! This is a bug.");
         }
