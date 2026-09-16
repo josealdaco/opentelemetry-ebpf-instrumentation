@@ -475,6 +475,16 @@ func NewEBPFParseContext(cfg *config.EBPFTracer, spansChan *msg.Queue[[]request.
 
 		payloadExtraction = cfg.PayloadExtraction
 
+		// Client-side payload detectors (Elasticsearch, AWS, GenAI, ...) parse
+		// the full request/response captured through BPF large buffers, which
+		// only exist when the HTTP capture size is non-zero. Without it, spans
+		// silently export as plain HTTP.
+		if payloadExtraction.HTTP.ClientEnabled() && cfg.BufferSizes.HTTP == 0 {
+			ptlog().Warn("HTTP payload extraction is enabled but the HTTP capture buffer is 0; " +
+				"payload detectors (e.g. Elasticsearch) will not run. " +
+				"Set OTEL_EBPF_BPF_BUFFER_SIZE_HTTP (ebpf.buffer_sizes.http) to a non-zero value, e.g. 8192")
+		}
+
 		dnsEvents = expirable.NewLRU(1024, dnsEventExpireHandler(emitSpans), cfg.DNSRequestTimeout)
 	}
 
