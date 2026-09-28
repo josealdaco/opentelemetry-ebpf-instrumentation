@@ -19,7 +19,12 @@ trace_key_from_pid_tid_with_p_key(trace_key_t *t_key, const pid_key_t *p_key, u6
     t_key->extra_id = id;
 }
 
-static __always_inline u8 find_trace_for_client_request_with_t_key(
-    const void *p_conn, u16 orig_dport, const void *t_key, u64 id, u8 lw_thread, void *tp) {
+static __always_inline u8 find_trace_for_client_request_with_t_key(const void *p_conn,
+                                                                   u16 orig_dport,
+                                                                   const void *t_key,
+                                                                   u64 id,
+                                                                   u8 lw_thread,
+                                                                   void *tp,
+                                                                   u8 allow_root_adoption) {
     return 0;
 }

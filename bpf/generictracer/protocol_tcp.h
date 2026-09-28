@@ -14,6 +14,7 @@
 #include <common/preempt_guard.h>
 #include <common/protocol_defs.h>
 #include <common/ringbuf.h>
+#include <common/tls_record.h>
 #include <common/trace_helpers.h>
 #include <common/trace_lifecycle.h>
 #include <common/trace_parent.h>
@@ -78,7 +79,23 @@ static __always_inline void tcp_get_or_set_trace_info(tcp_req_t *req,
                                                       u8 ssl,
                                                       u16 orig_dport) {
     if (req->direction == TCP_SEND) { // Client
-        const u8 found = find_trace_for_client_request(pid_conn, orig_dport, lw_thread, &req->tp);
+        // A raw TLS record on a not-yet-correlated connection is handshake or
+        // ciphertext noise: the event is discarded once the connection is
+        // flagged SSL, so it must not adopt the thread-root placeholder
+        // (allow_root_adoption=0), or the promoted root span is never exported
+        // and every decrypted span on this thread references a missing parent.
+        const u8 tls_noise = !ssl && tls_record_plausible_start(req->buf, (u32)req->len);
+
+        trace_key_t t_key = {0};
+        trace_key_from_pid_tid(&t_key);
+
+        const u8 found = find_trace_for_client_request_with_t_key(pid_conn,
+                                                                  orig_dport,
+                                                                  &t_key,
+                                                                  bpf_get_current_pid_tgid(),
+                                                                  lw_thread,
+                                                                  &req->tp,
+                                                                  !tls_noise);
         bpf_dbg_printk("Looking up client trace info, found=%d", found);
         if (found == k_parent_status_root) {
             // This span adopted a thread-root placeholder: it is the root of

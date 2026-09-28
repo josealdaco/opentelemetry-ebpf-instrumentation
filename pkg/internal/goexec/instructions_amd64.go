@@ -4,13 +4,21 @@
 package goexec // import "go.opentelemetry.io/obi/pkg/internal/goexec"
 
 import (
-	"fmt"
-
 	"golang.org/x/arch/x86/x86asm"
 )
 
 const endbrSize = 4
 
+// isENDBRXX matches ENDBR64/ENDBR32 (Intel CET landing pads) on the raw
+// instruction bytes. Like the pointer-authenticated returns handled in the
+// arm64 scanner (isPACReturn), these are newer ISA additions that the
+// x/arch decoder predates: without this check the scan would stop at the
+// very first instruction of any CET-enabled function.
+//
+// Note: x86-64 has no equivalent of arm64's RETAA/RETAB. Pointer
+// authentication is an ARMv8.3 feature; x86 returns are always plain RET
+// (0xC3/0xC2), which the decoder handles. The failure class shared between
+// the two architectures is decoder blind spots, not the PAC opcodes.
 func isENDBRXX(data []uint8) bool {
 	if len(data) < endbrSize {
 		return false
@@ -35,7 +43,13 @@ func FindReturnOffsets(baseOffset uint64, data []byte) ([]uint64, error) {
 
 		instruction, err := x86asm.Decode(data[index:], 64)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode x64 instruction at offset %d: %w", index, err)
+			// An instruction the decoder does not know (newer ISA extension,
+			// data island, padding). x86 instructions are variable-length, so
+			// the stream cannot be resynchronized reliably past this point:
+			// keep the offsets collected so far instead of failing the whole
+			// symbol, which would silently drop its return probes (the same
+			// failure mode the PAC handling avoids on arm64).
+			break
 		}
 
 		if instruction.Op == x86asm.RET {

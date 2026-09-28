@@ -392,8 +392,11 @@ static __always_inline void populate_dns_record(dns_req_t *req,
     trace_key_t t_key = {0};
     trace_key_from_pid_tid_with_p_key(&t_key, &conn_pid->p_key, conn_pid->id);
 
+    // DNS queries are ancillary: never adopt the thread-root placeholder
+    // (allow_root_adoption=0), so the first real protocol operation on the
+    // thread becomes the exported root span instead of a DNS lookup.
     const u8 found = find_trace_for_client_request_with_t_key(
-        p_conn, orig_dport, &t_key, conn_pid->id, k_lw_thread_none, &req->tp);
+        p_conn, orig_dport, &t_key, conn_pid->id, k_lw_thread_none, &req->tp, 0);
 
     bpf_dbg_printk("looking up client trace info, found: %d", found);
     if (found == k_parent_status_root) {

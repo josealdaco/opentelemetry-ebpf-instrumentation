@@ -1588,9 +1588,6 @@ int BPF_PROG(obi_raw_tracepoint_task_newtask, struct task_struct *task, u64 clon
     return 0;
 }
 
-enum { k_sys_exit_cleanup_delay_ns = 10000000 }; // 1 millisecond
-enum { k_sys_exit_max_drain = 8 };               // bounded work per invocation
-
 static __always_inline void sys_exit_cleanup(const exit_pending_t *pending) {
     trace_key_t task = pending->task;
     const u64 id = pending->id;
@@ -1626,41 +1623,26 @@ int BPF_KPROBE_GUARDED(obi_kprobe_sys_exit, int status) {
         return 0;
     }
 
-    const u64 now = bpf_ktime_get_ns();
+    trace_key_t task = {0};
+    task_tid(&task.p_key);
 
-    exit_pending_t pending = {};
-    task_tid(&pending.task.p_key);
-    pending.id = id;
-    pending.deadline_ns = now + k_sys_exit_cleanup_delay_ns;
-
-    bpf_dbg_printk("=== kprobe/sys_exit id=%d, tid=%d, pid=%d, ns=%d ===",
+    bpf_dbg_printk("=== kprobe/sys_exit id=%d, pid=%d, valid_pid(id)=%d ===",
                    id,
-                   pending.task.p_key.tid,
-                   pending.task.p_key.pid,
-                   pending.task.p_key.ns);
+                   pid_from_pid_tgid(id),
+                   valid_pid(id));
 
-    // kprobes can't sleep or use bpf_timer: enqueue the cleanup with a
-    // deadline, to be drained by later sys_exit invocations
-    if (bpf_map_push_elem(&exit_pending_queue, &pending, BPF_ANY) != 0) {
-        // Queue full: clean up immediately rather than leaking entries
-        sys_exit_cleanup(&pending);
-        return 0;
+    bpf_map_delete_elem(&clone_map, &task.p_key);
+    // This won't delete trace ids for traces with extra_id, like NodeJS. But,
+    // we expect that it doesn't matter, since NodeJS main thread won't exit.
+    bpf_map_delete_elem(&server_traces, &task);
+    trace_key_t vt_task = task;
+    if (java_vt_translate_tid(&vt_task.p_key)) {
+        bpf_map_delete_elem(&server_traces, &vt_task);
     }
-
-    // Drain entries whose deadline has passed (bounded work per invocation)
-    for (u8 i = 0; i < k_sys_exit_max_drain; ++i) {
-        exit_pending_t head = {};
-        if (bpf_map_peek_elem(&exit_pending_queue, &head) != 0) {
-            break;
-        }
-        if (head.deadline_ns > now) {
-            break;
-        }
-        if (bpf_map_pop_elem(&exit_pending_queue, &head) != 0) {
-            break;
-        }
-        sys_exit_cleanup(&head);
-    }
+    obi_ctx__del(id);
+    // A carrier dying without VirtualThread.unmount() must not leave a
+    // stale entry that would re-key a future thread reusing this tid.
+    bpf_map_delete_elem(&java_vt_threads, &task.p_key);
 
     return 0;
 }

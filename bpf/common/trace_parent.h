@@ -423,7 +423,8 @@ find_trace_for_client_request_with_t_key(const pid_connection_info_t *p_conn,
                                          trace_key_t *t_key,
                                          u64 pid_tgid,
                                          lw_thread_t lw_thread,
-                                         tp_info_t *tp) {
+                                         tp_info_t *tp,
+                                         u8 allow_root_adoption) {
     tp_info_pid_t *server_tp = find_parent_trace(p_conn, pid_tgid, lw_thread, t_key, orig_dport);
 
     if (server_tp && server_tp->valid && valid_trace(server_tp->tp.trace_id)) {
@@ -434,6 +435,14 @@ find_trace_for_client_request_with_t_key(const pid_connection_info_t *p_conn,
         // thread's trace. Checked before the transaction-time gate, since the
         // thread may have been created long before its first operation.
         if (server_tp->req_type == k_event_type_thread_root) {
+            // Ancillary operations (e.g. DNS lookups) must not become the
+            // root of the thread's trace: leave the placeholder untouched so
+            // the first real protocol operation adopts it instead.
+            if (!allow_root_adoption) {
+                bpf_dbg_printk("Thread-root placeholder found, adoption not allowed here");
+                return k_parent_status_none;
+            }
+
             __builtin_memcpy(tp->trace_id, server_tp->tp.trace_id, sizeof(tp->trace_id));
             __builtin_memset(tp->parent_id, 0, sizeof(tp->parent_id));
             urand_bytes(tp->span_id, SPAN_ID_SIZE_BYTES);
@@ -481,7 +490,7 @@ static __always_inline u8 find_trace_for_client_request(const pid_connection_inf
     const u64 pid_tgid = bpf_get_current_pid_tgid();
 
     return find_trace_for_client_request_with_t_key(
-        p_conn, orig_dport, &t_key, pid_tgid, lw_thread, tp);
+        p_conn, orig_dport, &t_key, pid_tgid, lw_thread, tp, 1);
 }
 
 static __always_inline u8
