@@ -48,6 +48,7 @@ export BPF_CLANG=clang-22
 export BPF_CFLAGS="-O2 -g -Wall -Werror"
 export GOCACHE=/tmp/go-build
 make generate
+make compile
 EOF
 
 RUN chmod +x /generate.sh

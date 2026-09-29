@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache \
 
 # Prior to using this debug.Dockerfile, you should manually run `make docker-generate`
 RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache \
-    make debug
+    make compile
 
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
