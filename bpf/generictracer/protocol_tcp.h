@@ -8,6 +8,7 @@
 
 #include <common/common.h>
 #include <common/connection_info.h>
+#include <common/http_info.h>
 #include <common/http_types.h>
 #include <common/large_buffers.h>
 #include <common/lw_thread.h>
@@ -18,6 +19,7 @@
 #include <common/trace_lifecycle.h>
 #include <common/trace_parent.h>
 
+#include <maps/ongoing_http.h>
 #include <maps/ongoing_tcp_req.h>
 #include <maps/tp_info_mem.h>
 
@@ -265,6 +267,17 @@ static __always_inline void handle_unknown_tcp_connection(pid_connection_info_t 
         }
     }
     if (!existing) {
+        // This connection already carries an HTTP request that is in flight or
+        // awaiting its delayed finish (SSL responses arrive in several chunks;
+        // only the first parses as HTTP). Registering the unparsed leftovers
+        // as an unknown-TCP request would emit a duplicate span for the same
+        // call on this connection.
+        const http_info_t *ongoing = bpf_map_lookup_elem(&ongoing_http, pid_conn);
+        if (ongoing && (!ongoing->submitted || ongoing->delayed)) {
+            bpf_dbg_printk("Connection has an in-flight HTTP request, ignoring unknown TCP");
+            return;
+        }
+
         // must check the local port: the peer port may also have a local
         // listener (docker-proxy), which would misclassify a client as a server
         const u16 local_port =
