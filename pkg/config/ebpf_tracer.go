@@ -99,6 +99,12 @@ type EBPFTracer struct {
 	// Optimizes for getting requests information immediately when request response is seen
 	HighRequestVolume bool `yaml:"high_request_volume" env:"OTEL_EBPF_BPF_HIGH_REQUEST_VOLUME" validate:"boolean"`
 
+	// Groups the operations of threads registered at clone time (e.g. daemon
+	// threads of a main process doing background work) under a single
+	// per-thread trace, keyed by the owning pid/tid/namespace, when no server
+	// request parent is found for them
+	ThreadTraceGrouping bool `yaml:"thread_trace_grouping" env:"OTEL_EBPF_BPF_THREAD_TRACE_GROUPING" validate:"boolean"`
+
 	// Enables the heuristic based detection of SQL requests. This can be used to detect
 	// talking to databases other than the ones we recognize in OBI, like Postgres and MySQL
 	HeuristicSQLDetect bool `yaml:"heuristic_sql_detect" env:"OTEL_EBPF_HEURISTIC_SQL_DETECT" validate:"boolean"`
