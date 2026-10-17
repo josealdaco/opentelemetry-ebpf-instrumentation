@@ -29,6 +29,7 @@
 #include <maps/puma_tasks.h>
 #include <maps/python_thread_state.h>
 #include <maps/server_traces.h>
+#include <maps/thread_trace_map.h>
 #include <maps/tp_info_mem.h>
 
 static __always_inline enum parent_status parent_kind(const tp_info_pid_t *server_tp) {
@@ -155,6 +156,70 @@ static __always_inline tp_info_pid_t *find_parent_process_trace(trace_key_t *t_k
     }
 
     return NULL;
+}
+
+// Thread trace grouping (opt-in via g_thread_trace_grouping): threads
+// registered in thread_trace_map at sys_clone time — e.g. a daemon thread of
+// a main process doing background work — always resolve to their OWN
+// per-thread root context. The lookup keys by the CALLER's own
+// {pid, tid, ns} only: a daemon thread shares the user-space pid with its
+// process but has its own OS tid, so each registered thread resolves to its
+// own group. The root is created lazily by the thread's first operation and
+// reused by every subsequent one, so all spans from the thread join a single
+// trace grouped by the owning pid/tid/ns.
+static __always_inline tp_info_pid_t *find_thread_group_trace(const trace_key_t *child_key) {
+    if (!g_thread_trace_grouping) {
+        return NULL;
+    }
+
+    // Only threads registered at clone time own a group
+    const pid_key_t *registered =
+        (const pid_key_t *)bpf_map_lookup_elem(&thread_trace_map, &child_key->p_key);
+
+    if (!registered) {
+        return NULL;
+    }
+
+    const trace_key_t group_key = {
+        .p_key = child_key->p_key,
+        .extra_id = 0,
+    };
+
+    tp_info_pid_t *group_tp = bpf_map_lookup_elem(&server_traces, &group_key);
+
+    if (group_tp) {
+        bpf_dbg_printk("thread group root found for pid=%d tid=%d, grouping under it",
+                       group_key.p_key.pid,
+                       group_key.p_key.tid);
+        return group_tp;
+    }
+
+    // First operation on this thread: create its root context so subsequent
+    // operations group under it. Marked as a server request so parent_kind()
+    // treats it as a live parent.
+    tp_info_pid_t *tp_p = (tp_info_pid_t *)tp_info_backup_mem();
+    if (!tp_p) {
+        return NULL;
+    }
+
+    __builtin_memset(tp_p, 0, sizeof(*tp_p));
+    tp_p->pid = child_key->p_key.pid;
+    tp_p->valid = 1;
+    tp_p->written = 0;
+    tp_p->req_type = k_event_type_http_request;
+    // Root span: new trace_id/span_id, zeroed parent_id, ts and sampled flag
+    init_new_trace(&tp_p->tp);
+
+    // BPF_NOEXIST: concurrent first operations on different CPUs must not
+    // overwrite each other's root; the stored entry is the single source
+    bpf_map_update_elem(&server_traces, &group_key, tp_p, BPF_NOEXIST);
+
+    bpf_dbg_printk("created thread group root for pid=%d tid=%d ns=%x",
+                   group_key.p_key.pid,
+                   group_key.p_key.tid,
+                   group_key.p_key.ns);
+
+    return bpf_map_lookup_elem(&server_traces, &group_key);
 }
 
 static __always_inline python_task_resolution_t
@@ -309,6 +374,7 @@ static __always_inline tp_info_pid_t *find_parent_trace(const pid_connection_inf
                                                         lw_thread_t lw_thread,
                                                         trace_key_t *t_key,
                                                         u16 orig_dport) {
+    // Begin looking for parent trace
     tp_info_pid_t *node_tp = find_nodejs_parent_trace(p_conn, orig_dport, pid_tgid);
 
     if (node_tp) {
@@ -350,6 +416,18 @@ static __always_inline tp_info_pid_t *find_parent_trace(const pid_connection_inf
     tp_info_pid_t *java_parent = find_parent_java_trace(t_key);
     if (java_parent) {
         return java_parent;
+    }
+
+    // Registered threads (thread trace grouping) always resolve to their OWN
+    // per-thread root, keyed by the caller's own {pid, tid, ns}: a request
+    // ongoing on the parent thread belongs to the parent's tid, while every
+    // request from the child thread ties to the child's group root. Checked
+    // BEFORE the clone_map ancestor walk so the child never adopts an
+    // ancestor's request instead.
+    tp_info_pid_t *thread_group = find_thread_group_trace(t_key);
+
+    if (thread_group) {
+        return thread_group;
     }
 
     tp_info_pid_t *proc_parent = find_parent_process_trace(t_key);

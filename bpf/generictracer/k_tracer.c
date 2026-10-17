@@ -54,6 +54,7 @@
 #include <maps/fd_to_connection.h>
 #include <maps/msg_buffers.h>
 #include <maps/sock_pids.h>
+#include <maps/thread_trace_map.h>
 #include <maps/unreadable_buffer_ports.h>
 #include <pid/pid.h>
 
@@ -1462,7 +1463,7 @@ int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_clone, int tid) {
 
     const u64 id = bpf_get_current_pid_tgid();
 
-    if (!valid_pid(id) || tid < 0) {
+    if (!valid_pid(id) || tid <= 0) {
         return 0;
     }
 
@@ -1476,7 +1477,27 @@ int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_clone, int tid) {
     };
 
     bpf_dbg_printk("=== kretprobe/sys_clone id->tid: %d -> %d ===", id, tid);
+    bpf_dbg_printk(
+        "=== sys_clone parent: tid=%d pid=%d ns=%x ===", parent.tid, parent.pid, parent.ns);
+    bpf_dbg_printk("=== sys_clone child: tid=%d pid=%d ns=%x ===", child.tid, child.pid, child.ns);
+
     bpf_map_update_elem(&clone_map, &child, &parent, BPF_ANY);
+
+    // Thread trace grouping (opt-in): register the new thread so its future
+    // operations are grouped under a single per-thread trace. The key is the
+    // CHILD's own identity: for a daemon thread the user-space pid stays the
+    // parent's pid while the OS tid is new — {pid=parent.pid, tid, ns} is
+    // exactly what any lookup from inside that thread rebuilds from its own
+    // task info, with no parent information required. The root context itself
+    // is created lazily by the thread's first operation
+    // (find_thread_group_trace), so threads that never do I/O cost nothing.
+    if (g_thread_trace_grouping) {
+        bpf_dbg_printk("=== sys_clone registering thread trace group: pid=%d tid=%d ns=%x ===",
+                       child.pid,
+                       child.tid,
+                       child.ns);
+        bpf_map_update_elem(&thread_trace_map, &child, &parent, BPF_ANY);
+    }
 
     return 0;
 }
@@ -1501,8 +1522,14 @@ int BPF_KPROBE_GUARDED(obi_kprobe_sys_exit, int status) {
                    valid_pid(id));
 
     bpf_map_delete_elem(&clone_map, &task.p_key);
+    // The dying thread's trace-group registration and its root context (both
+    // keyed by the thread's own {pid, tid, ns}) must not survive tid reuse.
+    bpf_map_delete_elem(&thread_trace_map, &task.p_key);
+
     // This won't delete trace ids for traces with extra_id, like NodeJS. But,
     // we expect that it doesn't matter, since NodeJS main thread won't exit.
+    // For forked children this also removes the root span registered at
+    // sys_clone time: the main thread's key is {pid, pid, ns}.
     bpf_map_delete_elem(&server_traces, &task);
     trace_key_t vt_task = task;
     if (java_vt_translate_tid(&vt_task.p_key)) {

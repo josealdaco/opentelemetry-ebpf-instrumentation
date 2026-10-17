@@ -250,6 +250,12 @@ func (p *Tracer) constants() map[string]any {
 		m["high_request_volume"] = uint32(0)
 	}
 
+	if p.cfg.EBPF.ThreadTraceGrouping {
+		m["g_thread_trace_grouping"] = uint32(1)
+	} else {
+		m["g_thread_trace_grouping"] = uint32(0)
+	}
+
 	if p.cfg.EBPF.DisableBlackBoxCP {
 		m["disable_black_box_cp"] = uint32(1)
 	} else {

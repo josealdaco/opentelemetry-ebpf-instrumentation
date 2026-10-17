@@ -14,6 +14,10 @@
 
 volatile const u64 max_transaction_time;
 volatile const u32 high_request_volume;
+// Feature gate: group operations of registered threads (e.g. daemon threads
+// of a main process) under a per-thread root trace. Set from
+// OTEL_EBPF_BPF_THREAD_TRACE_GROUPING / ebpf.thread_trace_grouping.
+volatile const u32 g_thread_trace_grouping;
 
 // Traceparent format: Traceparent: ver (2 chars) - trace_id (32 chars) - span_id (16 chars) - flags (2 chars)
 static __always_inline unsigned char *extract_trace_id(unsigned char *tp_start) {

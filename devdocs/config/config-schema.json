@@ -930,6 +930,12 @@
           "default": 4096,
           "x-env-var": "OTEL_EBPF_STATS_WAKEUP_DATA_BYTES"
         },
+        "thread_trace_grouping": {
+          "type": "boolean",
+          "description": "Groups the operations of threads registered at clone time (e.g. daemon threads of a main process doing background work) under a single per-thread trace, keyed by the owning pid/tid/namespace, when no server request parent is found for them",
+          "default": false,
+          "x-env-var": "OTEL_EBPF_BPF_THREAD_TRACE_GROUPING"
+        },
         "track_request_headers": {
           "type": "boolean",
           "description": "Enables the kprobes based HTTP request tracking to start tracking the request headers to process any 'Traceparent' fields.",
